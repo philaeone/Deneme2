@@ -5,12 +5,14 @@ Eski bir Android telefonu motosiklet gösterge paneline çeviren uygulama. Bajaj
 ## Ne yapar
 
 - GPS'ten hız göstergesi
-- Yandex Navigasyon'un bildiriminden sonraki dönüşü okuyup büyük okla gösterir
-- Spotify'ı kontrol eder: şarkı adı, kapak, önceki / oynat / sonraki
-- Saat, pil yüzdesi, pil sıcaklığı
+- Yandex Navigasyon'un bildiriminden sonraki dönüşü okur; mesafeye göre yaklaşan şematik bir yol çizer
+- Spotify'ı kontrol eder: kapak, şarkı adı, önceki / oynat / sonraki, ses − / +
+- Panelin renkleri çalan şarkının kapağına göre değişir
+- Saat, pil yüzdesi, konuma göre hava sıcaklığı (Open-Meteo), pil 40 °C'yi geçince uyarı
+- Menü: Yandex, Spotify, simgeli uygulama listesi, ayarlar
 - Ana ekran (launcher) olarak ayarlanabilir
 
-Harita ve rota hesaplama Yandex Navigasyon'da kalır; panel onun verdiği bilgiyi gösterir.
+Harita ve rota hesaplama Yandex Navigasyon'da kalır; panel onun verdiği bilgiyi gösterir. Şematik yol gerçek yolun şekli değildir, yalnızca "ne kadar sonra, hangi yöne" bilgisini çizer.
 
 ## Kurulum
 
@@ -29,4 +31,4 @@ adb shell dumpsys deviceidle whitelist +io.github.philaeone.dominarpanel
 
 ## Sorun ayıklama
 
-Navigasyon paneli boş kalıyorsa: Menü > Ham navigasyon verisi. O ekran, Yandex'in bildiriminden okunan her şeyi gösterir.
+Navigasyon paneli boş kalıyorsa: Menü > Ayarlar > Ham navigasyon verisi. O ekran, Yandex'in bildiriminden okunan her şeyi gösterir.

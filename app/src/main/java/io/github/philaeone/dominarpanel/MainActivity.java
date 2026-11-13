@@ -3,11 +3,12 @@ package io.github.philaeone.dominarpanel;
 import android.Manifest;
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.app.Dialog;
+import android.app.role.RoleManager;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.ComponentName;
 import android.content.Context;
-import android.content.DialogInterface;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.SharedPreferences;
@@ -15,23 +16,34 @@ import android.content.pm.ActivityInfo;
 import android.content.pm.PackageManager;
 import android.content.pm.ResolveInfo;
 import android.graphics.Typeface;
+import android.graphics.drawable.Drawable;
 import android.location.Location;
 import android.location.LocationListener;
 import android.location.LocationManager;
 import android.media.AudioManager;
 import android.media.session.MediaController;
+import android.net.Uri;
 import android.os.BatteryManager;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.PowerManager;
 import android.os.SystemClock;
 import android.provider.Settings;
 import android.service.notification.NotificationListenerService;
+import android.text.TextUtils;
 import android.util.Log;
 import android.util.TypedValue;
+import android.view.Gravity;
 import android.view.KeyEvent;
 import android.view.View;
+import android.view.ViewGroup;
 import android.view.WindowManager;
+import android.widget.BaseAdapter;
+import android.widget.GridView;
+import android.widget.ImageView;
+import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
@@ -49,12 +61,20 @@ public class MainActivity extends Activity implements PanelView.Actions, Locatio
     private static final String NAV_PKG = "ru.yandex.yandexnavi";
     private static final String MUSIC_PKG = NotifService.MUSIC_PKG;
     private static final int REQ_LOCATION = 1;
+    private static final int REQ_HOME = 2;
     private static final long FIX_TIMEOUT_MS = 4000L;
 
-    private static final int ORIENT_AUTO = 0;
-    private static final int ORIENT_PORTRAIT = 1;
-    private static final int ORIENT_LANDSCAPE = 2;
+    private static final int BG = 0xFF0B0D0C;
+    private static final int ROW = 0xFF161A18;
+    private static final int LINE = 0xFF26302B;
+    private static final int WHITE = 0xFFF2F5F3;
+    private static final int GREY = 0xFF98A39D;
+    private static final int GREEN = 0xFF39D353;
+    private static final int AMBER = 0xFFFFB300;
+
     private static final String[] ORIENT_NAMES = {"Otomatik", "Dikey", "Yatay"};
+    private static final String[] KEEP_ON_NAMES = {"Her zaman", "Sadece şarjdayken", "Kapalı"};
+    private static final String[] BRIGHT_NAMES = {"Sistem ayarı", "En yüksek"};
 
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final SimpleDateFormat clockFormat = new SimpleDateFormat("HH:mm", Locale.ROOT);
@@ -64,6 +84,21 @@ public class MainActivity extends Activity implements PanelView.Actions, Locatio
     private boolean locating;
     private long lastFixAt;
     private boolean askedLocation;
+    private double lastLat = Double.NaN;
+    private double lastLon = Double.NaN;
+    private long lastLocSavedAt;
+    private boolean charging;
+    private float battTemp = Float.NaN;
+
+    private Dialog settingsDialog;
+    private LinearLayout settingsList;
+
+    private static final class AppItem {
+        String label;
+        Drawable icon;
+        String pkg;
+        String cls;
+    }
 
     private final Runnable tick = new Runnable() {
         @Override
@@ -92,9 +127,13 @@ public class MainActivity extends Activity implements PanelView.Actions, Locatio
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         prefs = getSharedPreferences("panel", MODE_PRIVATE);
         locationManager = (LocationManager) getSystemService(Context.LOCATION_SERVICE);
+        Weather.restore(prefs);
+        if (prefs.contains("lat")) {
+            lastLat = prefs.getFloat("lat", 0f);
+            lastLon = prefs.getFloat("lon", 0f);
+        }
 
         view = new PanelView(this, this);
         try {
@@ -103,6 +142,8 @@ public class MainActivity extends Activity implements PanelView.Actions, Locatio
         }
         setContentView(view);
         applyOrientation();
+        applyBrightness();
+        applyKeepScreenOn();
     }
 
     @Override
@@ -119,6 +160,7 @@ public class MainActivity extends Activity implements PanelView.Actions, Locatio
         handler.post(tick);
         handler.removeCallbacks(animate);
         handler.postDelayed(animate, 150L);
+        if (settingsDialog != null && settingsDialog.isShowing()) fillSettings();
     }
 
     @Override
@@ -154,7 +196,7 @@ public class MainActivity extends Activity implements PanelView.Actions, Locatio
     }
 
     // ------------------------------------------------------------------
-    // Her saniye: saat, pil, GPS tazeligi, bildirim erisimi
+    // Her saniye: saat, pil, GPS tazeligi, hava, bildirim erisimi
     // ------------------------------------------------------------------
 
     private void refresh() {
@@ -166,9 +208,15 @@ public class MainActivity extends Activity implements PanelView.Actions, Locatio
                 int level = b.getIntExtra(BatteryManager.EXTRA_LEVEL, -1);
                 int scale = b.getIntExtra(BatteryManager.EXTRA_SCALE, 100);
                 view.battery = level >= 0 && scale > 0 ? Math.round(level * 100f / scale) : -1;
-                view.charging = b.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0) != 0;
+                boolean nowCharging = b.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0) != 0;
+                if (nowCharging != charging) {
+                    charging = nowCharging;
+                    applyKeepScreenOn();
+                }
+                view.charging = charging;
                 int t = b.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, Integer.MIN_VALUE);
-                view.battTemp = t == Integer.MIN_VALUE ? Float.NaN : t / 10f;
+                battTemp = t == Integer.MIN_VALUE ? Float.NaN : t / 10f;
+                view.battTemp = battTemp;
             }
         } catch (Exception ignored) {
         }
@@ -177,6 +225,8 @@ public class MainActivity extends Activity implements PanelView.Actions, Locatio
         view.locPermission = hasLocationPermission();
         if (SystemClock.elapsedRealtime() - lastFixAt > FIX_TIMEOUT_MS) view.speed = -1f;
         if (view.locPermission && !locating) startLocation();
+
+        updateWeather(false);
 
         boolean enabled = isListenerEnabled();
         view.listenerEnabled = enabled;
@@ -188,6 +238,36 @@ public class MainActivity extends Activity implements PanelView.Actions, Locatio
             }
         }
         view.invalidate();
+    }
+
+    /** Hava verisi 3 saatten eskiyse gosterilmez, 1 saatten eskiyse soluk gosterilir. */
+    private void updateWeather(boolean force) {
+        long age = Weather.ageMs();
+        boolean usable = !Float.isNaN(Weather.temp) && age < 3L * 60L * 60L * 1000L;
+        view.weatherTemp = usable ? Weather.temp : Float.NaN;
+        view.weatherStale = age > 60L * 60L * 1000L;
+
+        if (Double.isNaN(lastLat)) findLastKnownLocation();
+        if (!Double.isNaN(lastLat)) Weather.maybeFetch(prefs, lastLat, lastLon, force);
+    }
+
+    /** GPS henuz konum bulamadiysa sistemin bildigi son konumu dener (ag konumu dahil). */
+    @SuppressWarnings("MissingPermission")
+    private void findLastKnownLocation() {
+        if (locationManager == null || !hasLocationPermission()) return;
+        String[] providers = {LocationManager.GPS_PROVIDER, LocationManager.NETWORK_PROVIDER,
+                LocationManager.PASSIVE_PROVIDER};
+        for (String p : providers) {
+            try {
+                Location l = locationManager.getLastKnownLocation(p);
+                if (l != null) {
+                    lastLat = l.getLatitude();
+                    lastLon = l.getLongitude();
+                    return;
+                }
+            } catch (Exception ignored) {
+            }
+        }
     }
 
     private float readVolume() {
@@ -233,9 +313,13 @@ public class MainActivity extends Activity implements PanelView.Actions, Locatio
     @Override
     public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
-        if (requestCode == REQ_LOCATION) startLocation();
+        if (requestCode == REQ_LOCATION) {
+            startLocation();
+            if (settingsDialog != null && settingsDialog.isShowing()) fillSettings();
+        }
     }
 
+    @SuppressWarnings("MissingPermission")
     private void startLocation() {
         if (locating || locationManager == null || !hasLocationPermission()) return;
         try {
@@ -258,7 +342,15 @@ public class MainActivity extends Activity implements PanelView.Actions, Locatio
     @Override
     public void onLocationChanged(Location location) {
         if (location == null) return;
-        lastFixAt = SystemClock.elapsedRealtime();
+        long now = SystemClock.elapsedRealtime();
+        lastFixAt = now;
+        lastLat = location.getLatitude();
+        lastLon = location.getLongitude();
+        if (now - lastLocSavedAt > 10L * 60L * 1000L || lastLocSavedAt == 0L) {
+            // Hava sicakligi icin son konum saklanir; GPS'siz acilista da calissin.
+            lastLocSavedAt = now;
+            prefs.edit().putFloat("lat", (float) lastLat).putFloat("lon", (float) lastLon).apply();
+        }
         float kmh = location.hasSpeed() ? location.getSpeed() * 3.6f : 0f;
         // Dururken GPS 1-2 km/h oynar; onu sifir goster.
         view.speed = kmh < 2.5f ? 0f : kmh;
@@ -360,60 +452,391 @@ public class MainActivity extends Activity implements PanelView.Actions, Locatio
     }
 
     // ------------------------------------------------------------------
+    // Tam ekran pencereler icin ortak parcalar
+    // ------------------------------------------------------------------
+
+    private int dp(float v) {
+        return Math.round(v * getResources().getDisplayMetrics().density);
+    }
+
+    /** Ustunde buyuk bir "geri" satiri olan tam ekran pencere. */
+    private Dialog fullScreen(String title, View content) {
+        final Dialog d = new Dialog(this, android.R.style.Theme_DeviceDefault_NoActionBar_Fullscreen);
+        LinearLayout root = new LinearLayout(this);
+        root.setOrientation(LinearLayout.VERTICAL);
+        root.setBackgroundColor(BG);
+
+        TextView back = new TextView(this);
+        back.setText("‹   " + title);
+        back.setTextColor(WHITE);
+        back.setTypeface(Typeface.DEFAULT_BOLD);
+        back.setTextSize(TypedValue.COMPLEX_UNIT_SP, 22f);
+        back.setGravity(Gravity.CENTER_VERTICAL);
+        back.setPadding(dp(20), 0, dp(20), 0);
+        back.setBackgroundColor(ROW);
+        back.setOnClickListener(v -> d.dismiss());
+        root.addView(back, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(64)));
+
+        root.addView(content, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
+        d.setContentView(root);
+        return d;
+    }
+
+    // ------------------------------------------------------------------
     // Menu
     // ------------------------------------------------------------------
 
     private void showMenu() {
-        final int orient = prefs.getInt("orient", ORIENT_AUTO);
-        String[] items = {
-                "Uygulamalar",
-                "Ekran yönü: " + ORIENT_NAMES[orient],
-                "Bildirim erişimi" + (isListenerEnabled() ? " (açık)" : " (KAPALI)"),
-                "Ham navigasyon verisi",
-                "Varsayılan ana ekranı seç",
-                "Android ayarları"};
-        new AlertDialog.Builder(this)
-                .setTitle("Dominar Panel " + view.version)
-                .setItems(items, new DialogInterface.OnClickListener() {
-                    @Override
-                    public void onClick(DialogInterface dialog, int which) {
-                        switch (which) {
-                            case 0:
-                                showApps();
-                                break;
-                            case 1:
-                                prefs.edit().putInt("orient", (orient + 1) % 3).apply();
-                                applyOrientation();
-                                toast("Ekran yönü: " + ORIENT_NAMES[(orient + 1) % 3]);
-                                break;
-                            case 2:
-                                openSettings(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS);
-                                break;
-                            case 3:
-                                showRawNav();
-                                break;
-                            case 4:
-                                openSettings(Settings.ACTION_HOME_SETTINGS);
-                                break;
-                            case 5:
-                                openSettings(Settings.ACTION_SETTINGS);
-                                break;
-                            default:
-                                break;
-                        }
-                    }
-                })
-                .show();
+        LinearLayout list = new LinearLayout(this);
+        list.setOrientation(LinearLayout.VERTICAL);
+        list.setPadding(dp(12), dp(12), dp(12), dp(12));
+        final Dialog d = fullScreen("Menü", list);
+
+        addTile(list, "Yandex Navigasyon", () -> {
+            d.dismiss();
+            launch(NAV_PKG, "Yandex Navigasyon");
+        });
+        addTile(list, "Spotify", () -> {
+            d.dismiss();
+            launch(MUSIC_PKG, "Spotify");
+        });
+        addTile(list, "Uygulamalar", () -> {
+            d.dismiss();
+            showApps();
+        });
+        addTile(list, "Ayarlar", () -> {
+            d.dismiss();
+            showSettings();
+        });
+        d.show();
+    }
+
+    /** Ekrani esit paylasan buyuk tus; eldivenle basmak icin. */
+    private void addTile(LinearLayout parent, String label, final Runnable action) {
+        TextView t = new TextView(this);
+        t.setText(label);
+        t.setTextColor(WHITE);
+        t.setTypeface(Typeface.DEFAULT_BOLD);
+        t.setTextSize(TypedValue.COMPLEX_UNIT_SP, 24f);
+        t.setGravity(Gravity.CENTER);
+        t.setBackgroundColor(LINE);
+        t.setOnClickListener(v -> action.run());
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f);
+        lp.setMargins(0, dp(6), 0, dp(6));
+        parent.addView(t, lp);
+    }
+
+    // ------------------------------------------------------------------
+    // Uygulamalar
+    // ------------------------------------------------------------------
+
+    /** Panel ana ekran oldugu icin telefondaki diger uygulamalara buradan ulasilir. */
+    private void showApps() {
+        final PackageManager pm = getPackageManager();
+        Intent query = new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER);
+        final List<AppItem> items = new ArrayList<>();
+        for (ResolveInfo ri : pm.queryIntentActivities(query, 0)) {
+            if (ri.activityInfo == null || getPackageName().equals(ri.activityInfo.packageName)) continue;
+            AppItem a = new AppItem();
+            a.label = String.valueOf(ri.loadLabel(pm));
+            a.pkg = ri.activityInfo.packageName;
+            a.cls = ri.activityInfo.name;
+            try {
+                a.icon = ri.loadIcon(pm);
+            } catch (Throwable ignored) {
+            }
+            items.add(a);
+        }
+        Collections.sort(items, new Comparator<AppItem>() {
+            @Override
+            public int compare(AppItem a, AppItem b) {
+                return a.label.compareToIgnoreCase(b.label);
+            }
+        });
+
+        GridView grid = new GridView(this);
+        grid.setNumColumns(GridView.AUTO_FIT);
+        grid.setColumnWidth(dp(104));
+        grid.setStretchMode(GridView.STRETCH_COLUMN_WIDTH);
+        grid.setVerticalSpacing(dp(8));
+        grid.setHorizontalSpacing(dp(8));
+        grid.setPadding(dp(10), dp(12), dp(10), dp(12));
+        grid.setClipToPadding(false);
+        grid.setAdapter(new BaseAdapter() {
+            @Override
+            public int getCount() {
+                return items.size();
+            }
+
+            @Override
+            public Object getItem(int position) {
+                return items.get(position);
+            }
+
+            @Override
+            public long getItemId(int position) {
+                return position;
+            }
+
+            @Override
+            public View getView(int position, View convertView, ViewGroup parent) {
+                LinearLayout cell = (LinearLayout) convertView;
+                if (cell == null) {
+                    cell = new LinearLayout(MainActivity.this);
+                    cell.setOrientation(LinearLayout.VERTICAL);
+                    cell.setGravity(Gravity.CENTER_HORIZONTAL);
+                    cell.setPadding(dp(6), dp(12), dp(6), dp(10));
+                    cell.setBackgroundColor(ROW);
+                    ImageView iv = new ImageView(MainActivity.this);
+                    cell.addView(iv, new LinearLayout.LayoutParams(dp(60), dp(60)));
+                    TextView tv = new TextView(MainActivity.this);
+                    tv.setTextColor(WHITE);
+                    tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f);
+                    tv.setGravity(Gravity.CENTER);
+                    tv.setLines(2);
+                    tv.setEllipsize(TextUtils.TruncateAt.END);
+                    LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+                    lp.topMargin = dp(8);
+                    cell.addView(tv, lp);
+                }
+                AppItem a = items.get(position);
+                ((ImageView) cell.getChildAt(0)).setImageDrawable(a.icon);
+                ((TextView) cell.getChildAt(1)).setText(a.label);
+                return cell;
+            }
+        });
+
+        final Dialog d = fullScreen("Uygulamalar (" + items.size() + ")", grid);
+        grid.setOnItemClickListener((parent, v, position, id) -> {
+            AppItem a = items.get(position);
+            try {
+                startActivity(new Intent(Intent.ACTION_MAIN)
+                        .addCategory(Intent.CATEGORY_LAUNCHER)
+                        .setClassName(a.pkg, a.cls)
+                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED));
+                d.dismiss();
+            } catch (Exception e) {
+                toast("Açılamadı");
+            }
+        });
+        d.show();
+    }
+
+    // ------------------------------------------------------------------
+    // Ayarlar
+    // ------------------------------------------------------------------
+
+    private void showSettings() {
+        settingsList = new LinearLayout(this);
+        settingsList.setOrientation(LinearLayout.VERTICAL);
+        ScrollView scroll = new ScrollView(this);
+        scroll.addView(settingsList);
+        settingsDialog = fullScreen("Ayarlar", scroll);
+        fillSettings();
+        settingsDialog.show();
+    }
+
+    private void fillSettings() {
+        if (settingsList == null) return;
+        settingsList.removeAllViews();
+
+        addHeader("PANEL");
+        final boolean isHome = isDefaultHome();
+        addRow("Ana ekran yap",
+                isHome ? "Dominar Panel şu an ana ekran" : "Şu an: " + currentHomeLabel() + ". Değiştirmek için dokun.",
+                isHome, this::requestHomeRole);
+
+        final int keep = prefs.getInt("keepOn", 0);
+        addRow("Ekranı açık tut", KEEP_ON_NAMES[keep] + "  (panel ekrandayken)", true, () -> {
+            prefs.edit().putInt("keepOn", (keep + 1) % 3).apply();
+            applyKeepScreenOn();
+            fillSettings();
+        });
+
+        final int bright = prefs.getInt("bright", 0);
+        addRow("Parlaklık", BRIGHT_NAMES[bright] + "  (panel ekrandayken)", true, () -> {
+            prefs.edit().putInt("bright", (bright + 1) % 2).apply();
+            applyBrightness();
+            fillSettings();
+        });
+
+        final int orient = prefs.getInt("orient", 0);
+        addRow("Ekran yönü", ORIENT_NAMES[orient], true, () -> {
+            prefs.edit().putInt("orient", (orient + 1) % 3).apply();
+            applyOrientation();
+            fillSettings();
+        });
+
+        addHeader("İZİNLER");
+        boolean notif = isListenerEnabled();
+        addRow("Bildirim erişimi", notif ? "Açık" : "KAPALI. Navigasyon ve müzik bilgisi gelmez, dokun.", notif,
+                () -> openSettings(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS));
+
+        boolean loc = hasLocationPermission();
+        addRow("Konum izni", loc ? "Verildi" : "YOK. Hız ve hava sıcaklığı çalışmaz, dokun.", loc, () -> {
+            if (hasLocationPermission()) {
+                openAppDetails();
+            } else {
+                requestLocationPermission();
+            }
+        });
+
+        boolean battOk = isIgnoringBatteryOptimizations();
+        addRow("Pil optimizasyonu",
+                battOk ? "Muaf (arka planda kapatılmaz)" : "KISITLI. Android paneli kapatabilir, dokun.",
+                battOk, () -> openSettings(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS));
+
+        addHeader("BİLGİ");
+        addRow("Pil sıcaklığı",
+                Float.isNaN(battTemp) ? "Bilinmiyor"
+                        : String.format(Locale.ROOT, "%.1f °C", battTemp) + "  (40 °C üstünde üst şeritte uyarı çıkar)",
+                Float.isNaN(battTemp) || battTemp < 40f, null);
+
+        String weather;
+        if (Float.isNaN(Weather.temp)) {
+            if (Double.isNaN(lastLat)) {
+                weather = "Konum henüz bilinmiyor";
+            } else {
+                weather = "Alınamadı" + (Weather.lastError.isEmpty() ? "" : " (" + Weather.lastError + ")");
+            }
+        } else {
+            long min = Weather.ageMs() / 60000L;
+            weather = String.format(Locale.ROOT, "%.1f °C", Weather.temp) + ", " + min + " dk önce"
+                    + (Weather.lastError.isEmpty() ? "" : "  (son deneme başarısız)");
+        }
+        addRow("Hava sıcaklığı", weather + ". Yenilemek için dokun.", !Float.isNaN(Weather.temp), () -> {
+            updateWeather(true);
+            toast("Hava sıcaklığı isteniyor");
+            handler.postDelayed(this::refreshSettingsIfOpen, 4000L);
+        });
+
+        addRow("Ham navigasyon verisi", "Yandex'in bildiriminden okunan her şey", true, this::showRawNav);
+        addRow("Android ayarları", "Telefonun kendi ayar ekranı", true, () -> openSettings(Settings.ACTION_SETTINGS));
+        addRow("Sürüm", view.version, true, null);
+    }
+
+    private void refreshSettingsIfOpen() {
+        if (settingsDialog != null && settingsDialog.isShowing()) fillSettings();
+    }
+
+    private void addHeader(String text) {
+        TextView t = new TextView(this);
+        t.setText(text);
+        t.setTextColor(GREEN);
+        t.setTypeface(Typeface.DEFAULT_BOLD);
+        t.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f);
+        t.setLetterSpacing(0.12f);
+        t.setPadding(dp(20), dp(22), dp(20), dp(8));
+        settingsList.addView(t);
+    }
+
+    /** ok=false ise alt yazi turuncu gosterilir (dikkat isteyen durum). */
+    private void addRow(String title, String value, boolean ok, final Runnable action) {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.VERTICAL);
+        row.setPadding(dp(20), dp(16), dp(20), dp(16));
+        row.setBackgroundColor(ROW);
+
+        TextView t = new TextView(this);
+        t.setText(title);
+        t.setTextColor(WHITE);
+        t.setTypeface(Typeface.DEFAULT_BOLD);
+        t.setTextSize(TypedValue.COMPLEX_UNIT_SP, 19f);
+        row.addView(t);
+
+        TextView v = new TextView(this);
+        v.setText(value);
+        v.setTextColor(ok ? GREY : AMBER);
+        v.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f);
+        v.setPadding(0, dp(4), 0, 0);
+        row.addView(v);
+
+        if (action != null) row.setOnClickListener(x -> action.run());
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        lp.setMargins(0, 0, 0, dp(2));
+        settingsList.addView(row, lp);
+    }
+
+    // --- Ana ekran ---
+
+    private ResolveInfo currentHome() {
+        Intent home = new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME);
+        return getPackageManager().resolveActivity(home, PackageManager.MATCH_DEFAULT_ONLY);
+    }
+
+    private boolean isDefaultHome() {
+        ResolveInfo ri = currentHome();
+        return ri != null && ri.activityInfo != null && getPackageName().equals(ri.activityInfo.packageName);
+    }
+
+    private String currentHomeLabel() {
+        ResolveInfo ri = currentHome();
+        if (ri == null || ri.activityInfo == null || "android".equals(ri.activityInfo.packageName)) {
+            return "seçilmemiş";
+        }
+        return String.valueOf(ri.loadLabel(getPackageManager()));
+    }
+
+    /** Android'in onay penceresini acar; uygulama kendini sessizce ana ekran yapamaz. */
+    private void requestHomeRole() {
+        try {
+            if (Build.VERSION.SDK_INT >= 29) {
+                RoleManager rm = (RoleManager) getSystemService(Context.ROLE_SERVICE);
+                if (rm != null && rm.isRoleAvailable(RoleManager.ROLE_HOME) && !rm.isRoleHeld(RoleManager.ROLE_HOME)) {
+                    startActivityForResult(rm.createRequestRoleIntent(RoleManager.ROLE_HOME), REQ_HOME);
+                    return;
+                }
+            }
+        } catch (Throwable t) {
+            Log.w(NavParser.TAG, "ana ekran rolu istenemedi", t);
+        }
+        openSettings(Settings.ACTION_HOME_SETTINGS);
+    }
+
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode == REQ_HOME) refreshSettingsIfOpen();
+    }
+
+    // --- Ekran ---
+
+    private void applyKeepScreenOn() {
+        int mode = prefs.getInt("keepOn", 0);
+        boolean on = mode == 0 || (mode == 1 && charging);
+        if (on) {
+            getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        } else {
+            getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        }
+    }
+
+    private void applyBrightness() {
+        WindowManager.LayoutParams lp = getWindow().getAttributes();
+        lp.screenBrightness = prefs.getInt("bright", 0) == 1
+                ? 1f : WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE;
+        getWindow().setAttributes(lp);
     }
 
     private void applyOrientation() {
-        int orient = prefs.getInt("orient", ORIENT_AUTO);
-        if (orient == ORIENT_PORTRAIT) {
+        int orient = prefs.getInt("orient", 0);
+        if (orient == 1) {
             setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_PORTRAIT);
-        } else if (orient == ORIENT_LANDSCAPE) {
+        } else if (orient == 2) {
             setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE);
         } else {
             setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_FULL_SENSOR);
+        }
+    }
+
+    private boolean isIgnoringBatteryOptimizations() {
+        try {
+            PowerManager pm = (PowerManager) getSystemService(Context.POWER_SERVICE);
+            return pm != null && pm.isIgnoringBatteryOptimizations(getPackageName());
+        } catch (Exception e) {
+            return false;
         }
     }
 
@@ -425,43 +848,13 @@ public class MainActivity extends Activity implements PanelView.Actions, Locatio
         }
     }
 
-    /** Panel ana ekran oldugu icin diger uygulamalara buradan ulasilir. */
-    private void showApps() {
-        final PackageManager pm = getPackageManager();
-        Intent query = new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER);
-        final List<ResolveInfo> apps = new ArrayList<>();
-        for (ResolveInfo ri : pm.queryIntentActivities(query, 0)) {
-            if (ri.activityInfo == null || getPackageName().equals(ri.activityInfo.packageName)) continue;
-            apps.add(ri);
+    private void openAppDetails() {
+        try {
+            startActivity(new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                    Uri.parse("package:" + getPackageName())).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+        } catch (Exception e) {
+            toast("Ayar ekranı açılamadı");
         }
-        final List<String> labels = new ArrayList<>();
-        final List<ResolveInfo> sorted = new ArrayList<>(apps);
-        Collections.sort(sorted, new Comparator<ResolveInfo>() {
-            @Override
-            public int compare(ResolveInfo a, ResolveInfo b) {
-                return String.valueOf(a.loadLabel(pm)).compareToIgnoreCase(String.valueOf(b.loadLabel(pm)));
-            }
-        });
-        for (ResolveInfo ri : sorted) labels.add(String.valueOf(ri.loadLabel(pm)));
-
-        new AlertDialog.Builder(this)
-                .setTitle("Uygulamalar")
-                .setItems(labels.toArray(new String[0]), new DialogInterface.OnClickListener() {
-                    @Override
-                    public void onClick(DialogInterface dialog, int which) {
-                        ResolveInfo ri = sorted.get(which);
-                        try {
-                            Intent i = new Intent(Intent.ACTION_MAIN)
-                                    .addCategory(Intent.CATEGORY_LAUNCHER)
-                                    .setClassName(ri.activityInfo.packageName, ri.activityInfo.name)
-                                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED);
-                            startActivity(i);
-                        } catch (Exception e) {
-                            toast("Açılamadı");
-                        }
-                    }
-                })
-                .show();
     }
 
     /** Navigasyon bildiriminden okunan her seyi gosterir; ayiklama icin. */
@@ -469,14 +862,14 @@ public class MainActivity extends Activity implements PanelView.Actions, Locatio
         final String dump = NavState.rawDump.isEmpty()
                 ? (isListenerEnabled()
                         ? "Henüz navigasyon bildirimi görülmedi.\n\nYandex Navigasyon'da rota başlatıp buraya dön."
-                        : "Bildirim erişimi kapalı. Menü > Bildirim erişimi'nden aç.")
+                        : "Bildirim erişimi kapalı. Ayarlar > Bildirim erişimi'nden aç.")
                 : NavState.rawDump;
         TextView tv = new TextView(this);
         tv.setText(dump);
         tv.setTextIsSelectable(true);
         tv.setTypeface(Typeface.MONOSPACE);
         tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f);
-        int p = Math.round(20f * getResources().getDisplayMetrics().density);
+        int p = dp(20);
         tv.setPadding(p, p, p, p);
         ScrollView sv = new ScrollView(this);
         sv.addView(tv);
@@ -484,13 +877,10 @@ public class MainActivity extends Activity implements PanelView.Actions, Locatio
                 .setTitle("Ham navigasyon verisi")
                 .setView(sv)
                 .setPositiveButton("Kapat", null)
-                .setNeutralButton("Kopyala", new DialogInterface.OnClickListener() {
-                    @Override
-                    public void onClick(DialogInterface dialog, int which) {
-                        ClipboardManager cm = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
-                        if (cm != null) cm.setPrimaryClip(ClipData.newPlainText("nav", dump));
-                        toast("Kopyalandı");
-                    }
+                .setNeutralButton("Kopyala", (dialog, which) -> {
+                    ClipboardManager cm = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+                    if (cm != null) cm.setPrimaryClip(ClipData.newPlainText("nav", dump));
+                    toast("Kopyalandı");
                 })
                 .show();
     }

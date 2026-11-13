@@ -45,9 +45,10 @@ final class PanelView extends View {
 
     private static final int BG = 0xFF0B0D0C;
     private static final int PANEL = 0xFF161A18;
-    private static final int PANEL_HI = 0xFF26302B;
-    private static final int ACCENT = 0xFF39D353;
-    private static final int ACCENT_DIM = 0xFF1C4A27;
+    private static final int TRACK = 0xFF26302B;
+    private static final int DEF_ACCENT = 0xFF39D353;
+    private static final int DEF_DIM = 0xFF1C4A27;
+    private static final int DEF_BUTTON = 0xFF26302B;
     private static final int WHITE = 0xFFF2F5F3;
     private static final int GREY = 0xFF98A39D;
     private static final int AMBER = 0xFFFFB300;
@@ -67,7 +68,20 @@ final class PanelView extends View {
     float battTemp = Float.NaN;
     /** Medya sesi, 0..1; bilinmiyorsa -1. */
     float volume = -1f;
+    /** Hava sicakligi (°C); bilinmiyorsa NaN. */
+    float weatherTemp = Float.NaN;
+    /** Hava verisi eskiyse soluk gosterilir. */
+    boolean weatherStale;
     String version = "";
+
+    // --- Kapaga gore degisen tema: gecerli deger hedefe dogru yumusakca kayar ---
+    private int accent = DEF_ACCENT;
+    private int accentDim = DEF_DIM;
+    private int button = DEF_BUTTON;
+    private int accentTarget = DEF_ACCENT;
+    private int dimTarget = DEF_DIM;
+    private int buttonTarget = DEF_BUTTON;
+    private Bitmap themedArt;
 
     private final Actions actions;
 
@@ -81,10 +95,11 @@ final class PanelView extends View {
     private final RectF dst = new RectF();
     private final Typeface bold = Typeface.create("sans-serif-condensed", Typeface.BOLD);
     private final Typeface regular = Typeface.create("sans-serif", Typeface.NORMAL);
-    private final ColorFilter accentTint = new PorterDuffColorFilter(ACCENT, PorterDuff.Mode.SRC_IN);
+    private ColorFilter accentTint = new PorterDuffColorFilter(DEF_ACCENT, PorterDuff.Mode.SRC_IN);
     private final ColorFilter greyTint = new PorterDuffColorFilter(GREY, PorterDuff.Mode.SRC_IN);
 
     private final RectF rStatus = new RectF();
+    private final RectF rMenu = new RectF();
     private final RectF rSpeed = new RectF();
     private final RectF rNav = new RectF();
     private final RectF rMusic = new RectF();
@@ -94,9 +109,6 @@ final class PanelView extends View {
     private final RectF rNext = new RectF();
     private final RectF rVolDown = new RectF();
     private final RectF rVolUp = new RectF();
-    private final RectF rBtnNav = new RectF();
-    private final RectF rBtnMusic = new RectF();
-    private final RectF rBtnMenu = new RectF();
 
     private float pad = 16f;
     private float corner = 20f;
@@ -125,9 +137,9 @@ final class PanelView extends View {
         float ip = pad * 0.8f;
 
         if (h >= w) {
-            // Dikey: durum, hiz, navigasyon, muzik, uygulama tuslari.
+            // Dikey: durum, hiz, navigasyon, muzik.
             float y = pad;
-            float statusH = h * 0.05f;
+            float statusH = h * 0.055f;
             rStatus.set(pad, y, w - pad, y + statusH);
             y += statusH + pad;
 
@@ -136,23 +148,16 @@ final class PanelView extends View {
             y += speedH + pad;
 
             float bottom = h - pad;
-            float btnH = h * 0.075f;
-            float bw = (w - 4f * pad) / 3f;
-            rBtnNav.set(pad, bottom - btnH, pad + bw, bottom);
-            rBtnMusic.set(2f * pad + bw, bottom - btnH, 2f * pad + 2f * bw, bottom);
-            rBtnMenu.set(3f * pad + 2f * bw, bottom - btnH, w - pad, bottom);
-
-            float musicH = h * 0.185f;
-            float musicBottom = bottom - btnH - pad;
-            rMusic.set(pad, musicBottom - musicH, w - pad, musicBottom);
+            float musicH = h * 0.275f;
+            rMusic.set(pad, bottom - musicH, w - pad, bottom);
             rNav.set(pad, y, w - pad, rMusic.top - pad);
 
             float x0 = rMusic.left + ip;
             float x1 = rMusic.right - ip;
-            float infoH = (musicH - 3f * ip) * 0.38f;
-            rMusicInfo.set(x0, rMusic.top + ip, x1, rMusic.top + ip + infoH);
-            float by0 = rMusicInfo.bottom + ip;
+            float rowH = h * 0.095f;
             float by1 = rMusic.bottom - ip;
+            float by0 = by1 - rowH;
+            rMusicInfo.set(x0, rMusic.top + ip, x1, by0 - ip);
             float w5 = (x1 - x0 - 4f * ip) / 5f;
             rPrev.set(x0, by0, x0 + w5, by1);
             rPlay.set(x0 + (w5 + ip), by0, x0 + (w5 + ip) + w5, by1);
@@ -160,7 +165,7 @@ final class PanelView extends View {
             rVolDown.set(x0 + 3f * (w5 + ip), by0, x0 + 3f * (w5 + ip) + w5, by1);
             rVolUp.set(x0 + 4f * (w5 + ip), by0, x1, by1);
         } else {
-            // Yatay: solda hiz, ortada navigasyon, sagda muzik ve uygulama tuslari.
+            // Yatay: solda hiz, ortada navigasyon, sagda muzik.
             float statusH = h * 0.11f;
             rStatus.set(pad, pad, w - pad, pad + statusH);
             float top = 2f * pad + statusH;
@@ -171,20 +176,14 @@ final class PanelView extends View {
 
             float rightW = w * 0.29f;
             float rx = w - pad - rightW;
-            float appH = h * 0.14f;
-            float bw = (rightW - 2f * pad) / 3f;
-            rBtnNav.set(rx, bottom - appH, rx + bw, bottom);
-            rBtnMusic.set(rx + bw + pad, bottom - appH, rx + 2f * bw + pad, bottom);
-            rBtnMenu.set(rx + 2f * bw + 2f * pad, bottom - appH, w - pad, bottom);
-
-            rMusic.set(rx, top, w - pad, bottom - appH - pad);
+            rMusic.set(rx, top, w - pad, bottom);
             rNav.set(2f * pad + leftW, top, rx - pad, bottom);
 
             float x0 = rMusic.left + ip;
             float x1 = rMusic.right - ip;
             float inner = rMusic.height() - 4f * ip;
-            float infoH = inner * 0.30f;
-            float transH = inner * 0.40f;
+            float infoH = inner * 0.38f;
+            float transH = inner * 0.35f;
             rMusicInfo.set(x0, rMusic.top + ip, x1, rMusic.top + ip + infoH);
             float ty0 = rMusicInfo.bottom + ip;
             float w3 = (x1 - x0 - 2f * ip) / 3f;
@@ -196,6 +195,7 @@ final class PanelView extends View {
             rVolDown.set(x0, vy0, x0 + w2, rMusic.bottom - ip);
             rVolUp.set(x0 + w2 + ip, vy0, x1, rMusic.bottom - ip);
         }
+        rMenu.set(rStatus.left, rStatus.top, rStatus.left + rStatus.height() * 1.5f, rStatus.bottom);
     }
 
     // ------------------------------------------------------------------
@@ -206,33 +206,96 @@ final class PanelView extends View {
     protected void onDraw(Canvas c) {
         c.drawColor(BG);
         if (getWidth() == 0 || getHeight() == 0) return;
+        stepTheme();
         drawStatus(c);
         drawSpeed(c);
         drawNav(c);
         drawMusic(c);
-        drawButtons(c);
+    }
+
+    /** Kapak degistiyse yeni hedef renkleri secer ve gecerli renkleri hedefe yaklastirir. */
+    private void stepTheme() {
+        Bitmap art = MediaState.art;
+        if (art != themedArt) {
+            themedArt = art;
+            int[] t = CoverColor.theme(art);
+            if (t != null) {
+                accentTarget = t[0];
+                dimTarget = t[1];
+                buttonTarget = t[2];
+            } else {
+                accentTarget = DEF_ACCENT;
+                dimTarget = DEF_DIM;
+                buttonTarget = DEF_BUTTON;
+            }
+        }
+        if (accent != accentTarget || accentDim != dimTarget || button != buttonTarget) {
+            accent = approach(accent, accentTarget);
+            accentDim = approach(accentDim, dimTarget);
+            button = approach(button, buttonTarget);
+            accentTint = new PorterDuffColorFilter(accent, PorterDuff.Mode.SRC_IN);
+            postInvalidateOnAnimation();
+        }
+    }
+
+    private static int approach(int from, int to) {
+        if (from == to) return to;
+        int r = channel((from >> 16) & 0xFF, (to >> 16) & 0xFF);
+        int g = channel((from >> 8) & 0xFF, (to >> 8) & 0xFF);
+        int b = channel(from & 0xFF, to & 0xFF);
+        return 0xFF000000 | (r << 16) | (g << 8) | b;
+    }
+
+    private static int channel(int from, int to) {
+        int d = to - from;
+        if (Math.abs(d) <= 3) return to;
+        return from + Math.round(d * 0.14f);
     }
 
     private void drawStatus(Canvas c) {
-        float size = rStatus.height() * 0.8f;
-        float base = baseline(rStatus.centerY(), size, true);
-        text(c, clock, rStatus.left + pad * 0.3f, base, size, WHITE, Paint.Align.LEFT, true);
+        // Sol: menu tusu (uc cizgi).
+        box(c, rMenu, pressed == A_MENU ? accentDim : button);
+        float bw = rMenu.width() * 0.42f;
+        float bh = Math.max(3f, rMenu.height() * 0.08f);
+        float gap = rMenu.height() * 0.2f;
+        fill.setColor(WHITE);
+        for (int i = -1; i <= 1; i++) {
+            float cy = rMenu.centerY() + i * gap;
+            c.drawRoundRect(rMenu.centerX() - bw / 2f, cy - bh / 2f, rMenu.centerX() + bw / 2f, cy + bh / 2f,
+                    bh / 2f, bh / 2f, fill);
+        }
 
+        // Sag: pil yuzdesi, GPS, hava sicakligi, gerekirse pil sicakligi uyarisi.
         float x = rStatus.right - pad * 0.3f;
-        float small = size * 0.72f;
+        float small = rStatus.height() * 0.56f;
         float sbase = baseline(rStatus.centerY(), small, true);
         if (battery >= 0) {
             String b = battery + "%";
-            text(c, b, x, sbase, small, charging ? ACCENT : WHITE, Paint.Align.RIGHT, true);
+            text(c, b, x, sbase, small, charging ? accent : WHITE, Paint.Align.RIGHT, true);
             x -= tp.measureText(b) + pad;
         }
-        if (!Float.isNaN(battTemp)) {
-            String t = Math.round(battTemp) + "°C";
-            int col = battTemp >= 45f ? RED : (battTemp >= 40f ? AMBER : GREY);
-            text(c, t, x, sbase, small, col, Paint.Align.RIGHT, true);
+        text(c, "GPS", x, sbase, small, speed >= 0f ? accent : RED, Paint.Align.RIGHT, true);
+        x -= tp.measureText("GPS") + pad;
+        if (!Float.isNaN(weatherTemp)) {
+            String t = Math.round(weatherTemp) + "°C";
+            text(c, t, x, sbase, small, weatherStale ? GREY : WHITE, Paint.Align.RIGHT, true);
             x -= tp.measureText(t) + pad;
         }
-        text(c, "GPS", x, sbase, small, speed >= 0f ? ACCENT : RED, Paint.Align.RIGHT, true);
+        if (!Float.isNaN(battTemp) && battTemp >= 40f) {
+            String t = "PİL " + Math.round(battTemp) + "°";
+            text(c, t, x, sbase, small, battTemp >= 45f ? RED : AMBER, Paint.Align.RIGHT, true);
+            x -= tp.measureText(t) + pad;
+        }
+
+        // Orta: saat. Sagdaki grup genisse sola kayar, menu tusuna binmez.
+        float size = rStatus.height() * 0.84f;
+        float base = baseline(rStatus.centerY(), size, true);
+        float cw = tp.measureText(clock);
+        float cx = rStatus.centerX();
+        if (cx + cw / 2f > x) cx = x - cw / 2f;
+        float minCx = rMenu.right + pad + cw / 2f;
+        if (cx < minCx) cx = minCx;
+        text(c, clock, cx, base, size, WHITE, Paint.Align.CENTER, true);
     }
 
     private void drawSpeed(Canvas c) {
@@ -246,12 +309,12 @@ final class PanelView extends View {
         tmp.set(cx - rad, cy - rad, cx + rad, cy + rad);
         stroke.setStrokeWidth(sw);
         stroke.setStrokeCap(Paint.Cap.ROUND);
-        stroke.setColor(PANEL_HI);
+        stroke.setColor(TRACK);
         c.drawArc(tmp, 150f, 240f, false, stroke);
         if (speed >= 0f) {
             float frac = Math.min(speed, MAX_SPEED) / MAX_SPEED;
             if (frac > 0.005f) {
-                stroke.setColor(speed > 120f ? AMBER : ACCENT);
+                stroke.setColor(speed > 120f ? AMBER : accent);
                 c.drawArc(tmp, 150f, 240f * frac, false, stroke);
             }
         }
@@ -270,7 +333,7 @@ final class PanelView extends View {
 
         float ls = Math.min(rad * 0.15f, r.height() * 0.08f);
         tp.setLetterSpacing(0.12f);
-        text(c, "DOMINAR 400", r.left + pad, r.top + pad + ls, ls, ACCENT, Paint.Align.LEFT, true);
+        text(c, "DOMINAR 400", r.left + pad, r.top + pad + ls, ls, accent, Paint.Align.LEFT, true);
         tp.setLetterSpacing(0f);
     }
 
@@ -287,7 +350,7 @@ final class PanelView extends View {
 
     private void drawNav(Canvas c) {
         RectF p = rNav;
-        box(c, p, pressed == A_NAV_BOX ? PANEL_HI : PANEL);
+        box(c, p, pressed == A_NAV_BOX ? TRACK : PANEL);
         if (!listenerEnabled) {
             drawNotice(c, p, "Bildirim erişimi gerekli",
                     "Navigasyon ve müzik bilgisi için buraya dokunup Dominar Panel'e izin ver.");
@@ -336,7 +399,7 @@ final class PanelView extends View {
             tmp.set(road.centerX() - s / 2f, road.centerY() - s / 2f, road.centerX() + s / 2f,
                     road.centerY() + s / 2f);
             drawArrow(c, tmp, dir == NavState.DIR_NONE ? NavState.DIR_STRAIGHT : dir,
-                    dir == NavState.DIR_NONE ? ACCENT_DIM : ACCENT);
+                    dir == NavState.DIR_NONE ? accentDim : accent);
         }
 
         // Sag sutun: mesafe, sokak, navigasyonun simgesi, ozet.
@@ -471,7 +534,7 @@ final class PanelView extends View {
         path.lineTo(bikeX, bikeY + s * 0.35f);
         path.lineTo(bikeX + s * 0.85f, bikeY + s * 0.8f);
         path.close();
-        fill.setColor(ACCENT);
+        fill.setColor(accent);
         c.drawPath(path, fill);
         stroke.setColor(BG);
         stroke.setStrokeWidth(s * 0.16f);
@@ -501,42 +564,48 @@ final class PanelView extends View {
     private void drawMusic(Canvas c) {
         box(c, rMusic, PANEL);
         RectF info = rMusicInfo;
-        float side = info.height();
+        if (pressed == A_OPEN_MUSIC) {
+            fill.setColor(TRACK);
+            c.drawRoundRect(info, corner * 0.5f, corner * 0.5f, fill);
+        }
+        float side = Math.min(info.height(), info.width() * 0.5f);
         RectF cover = tmp2;
-        cover.set(info.left, info.top, info.left + side, info.bottom);
+        cover.set(info.left, info.centerY() - side / 2f, info.left + side, info.centerY() + side / 2f);
         Bitmap art = MediaState.art;
         if (art != null && !art.isRecycled()) {
             drawBitmapFit(c, art, cover, corner * 0.5f, null);
         } else {
-            fill.setColor(PANEL_HI);
+            fill.setColor(button);
             c.drawRoundRect(cover, corner * 0.5f, corner * 0.5f, fill);
             text(c, "♪", cover.centerX(), baseline(cover.centerY(), side * 0.5f, true), side * 0.5f, GREY,
                     Paint.Align.CENTER, true);
         }
 
-        float tx0 = cover.right + pad * 0.8f;
+        float tx0 = cover.right + pad;
         float tx1 = info.right;
+        float tw = tx1 - tx0;
         String title = MediaState.title;
         String artist = MediaState.artist;
         if (!listenerEnabled) {
             title = "Bildirim erişimi yok";
-            artist = "Menü > Bildirim erişimi";
+            artist = "Menü > Ayarlar";
         } else if (!MediaState.hasSession || (title.isEmpty() && artist.isEmpty())) {
             title = "Müzik çalmıyor";
-            artist = "Başlatmak için oynat tuşuna bas";
+            artist = "Oynat tuşuna bas";
         }
-        float barH = Math.max(3f, side * 0.07f);
-        tmp.set(tx0, info.top, tx1, info.top + side * 0.52f);
-        textFit(c, title, tmp, side * 0.36f, WHITE, Paint.Align.LEFT, true);
-        tmp.set(tx0, info.top + side * 0.5f, tx1, info.bottom - barH * 2f);
-        textFit(c, artist, tmp, side * 0.25f, GREY, Paint.Align.LEFT, false);
+        float tsize = Math.min(side * 0.18f, tw * 0.13f);
+        float barH = Math.max(4f, side * 0.035f);
+        tmp.set(tx0, cover.top, tx1, cover.top + side * 0.52f);
+        multiline(c, title, tmp, tsize, WHITE, 2, false, true);
+        tmp.set(tx0, cover.top + side * 0.54f, tx1, cover.top + side * 0.8f);
+        textFit(c, artist, tmp, tsize * 0.72f, GREY, Paint.Align.LEFT, false);
 
         // Ses duzeyi cubugu.
         if (volume >= 0f) {
-            fill.setColor(PANEL_HI);
-            c.drawRoundRect(tx0, info.bottom - barH, tx1, info.bottom, barH / 2f, barH / 2f, fill);
-            fill.setColor(ACCENT);
-            c.drawRoundRect(tx0, info.bottom - barH, tx0 + (tx1 - tx0) * Math.min(1f, volume), info.bottom,
+            fill.setColor(TRACK);
+            c.drawRoundRect(tx0, cover.bottom - barH, tx1, cover.bottom, barH / 2f, barH / 2f, fill);
+            fill.setColor(accent);
+            c.drawRoundRect(tx0, cover.bottom - barH, tx0 + tw * Math.min(1f, volume), cover.bottom,
                     barH / 2f, barH / 2f, fill);
         }
 
@@ -549,13 +618,13 @@ final class PanelView extends View {
 
     /** kind: 0 onceki, 1 oynat, 2 duraklat, 3 sonraki */
     private void drawMediaButton(Canvas c, RectF r, int kind, boolean down) {
-        box(c, r, down ? ACCENT_DIM : PANEL_HI);
+        box(c, r, down ? accentDim : button);
         float s = Math.min(r.width(), r.height()) * 0.46f;
         c.save();
         c.translate(r.centerX() - s / 2f, r.centerY() - s / 2f);
         c.scale(s / 100f, s / 100f);
         if (kind == 0) c.scale(-1f, 1f, 50f, 50f);
-        fill.setColor(kind == 1 || kind == 2 ? ACCENT : WHITE);
+        fill.setColor(kind == 1 || kind == 2 ? accent : WHITE);
         path.reset();
         if (kind == 1) {
             path.moveTo(24f, 10f);
@@ -578,7 +647,7 @@ final class PanelView extends View {
     }
 
     private void drawVolumeButton(Canvas c, RectF r, boolean up, boolean down) {
-        box(c, r, down ? ACCENT_DIM : PANEL_HI);
+        box(c, r, down ? accentDim : button);
         float label = Math.min(r.height() * 0.17f, r.width() * 0.2f);
         text(c, "SES", r.centerX(), r.top + label * 1.5f, label, GREY, Paint.Align.CENTER, true);
         float s = Math.min(r.width(), r.height()) * 0.34f;
@@ -589,18 +658,6 @@ final class PanelView extends View {
         if (up) {
             c.drawRect(r.centerX() - t / 2f, cy - s / 2f, r.centerX() + t / 2f, cy + s / 2f, fill);
         }
-    }
-
-    private void drawButtons(Canvas c) {
-        drawButton(c, rBtnNav, "YANDEX", pressed == A_OPEN_NAV);
-        drawButton(c, rBtnMusic, "SPOTIFY", pressed == A_OPEN_MUSIC);
-        drawButton(c, rBtnMenu, "MENÜ", pressed == A_MENU);
-    }
-
-    private void drawButton(Canvas c, RectF r, String label, boolean down) {
-        box(c, r, down ? ACCENT_DIM : PANEL_HI);
-        tmp.set(r.left + pad * 0.5f, r.top, r.right - pad * 0.5f, r.bottom);
-        textFit(c, label, tmp, Math.min(r.height() * 0.38f, r.width() * 0.2f), WHITE, Paint.Align.CENTER, true);
     }
 
     // ------------------------------------------------------------------
@@ -738,9 +795,8 @@ final class PanelView extends View {
     // ------------------------------------------------------------------
 
     private int hit(float x, float y) {
-        if (rBtnNav.contains(x, y)) return A_OPEN_NAV;
-        if (rBtnMusic.contains(x, y)) return A_OPEN_MUSIC;
-        if (rBtnMenu.contains(x, y)) return A_MENU;
+        // Menu tusunun dokunma alani ciziminden biraz genis tutulur.
+        if (x <= rMenu.right + pad && y <= rMenu.bottom + pad) return A_MENU;
         if (rPrev.contains(x, y)) return A_PREV;
         if (rPlay.contains(x, y)) return A_PLAY;
         if (rNext.contains(x, y)) return A_NEXT;
@@ -748,7 +804,7 @@ final class PanelView extends View {
         if (rVolUp.contains(x, y)) return A_VOL_UP;
         if (rSpeed.contains(x, y)) return locPermission ? A_NONE : A_GRANT_LOC;
         if (rNav.contains(x, y)) return listenerEnabled ? A_NAV_BOX : A_GRANT_NOTIF;
-        if (rMusicInfo.contains(x, y)) return listenerEnabled ? A_NONE : A_GRANT_NOTIF;
+        if (rMusicInfo.contains(x, y)) return listenerEnabled ? A_OPEN_MUSIC : A_GRANT_NOTIF;
         return A_NONE;
     }
 
