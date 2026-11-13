@@ -8,10 +8,12 @@ import android.graphics.drawable.BitmapDrawable;
 import android.graphics.drawable.Drawable;
 import android.graphics.drawable.Icon;
 import android.os.Bundle;
+import android.os.SystemClock;
 import android.service.notification.StatusBarNotification;
 import android.util.Log;
 import android.view.View;
 import android.view.ViewGroup;
+import android.widget.Button;
 import android.widget.FrameLayout;
 import android.widget.ImageView;
 import android.widget.RemoteViews;
@@ -69,16 +71,33 @@ final class NavParser {
     private static final Pattern P_ARRIVE = Pattern.compile(
             B0 + "vardınız|ulaştınız|arrived|прибыли" + B1, FLAGS);
 
+    private static final Pattern P_DIST_ONLY = Pattern.compile(
+            "^\\s*(\\d+(?:[.,]\\d+)?)\\s*(km|m|км|м)\\.?\\s*$", FLAGS);
+    private static final Pattern P_CLOCK = Pattern.compile("^\\s*\\d{1,2}[:.]\\d{2}\\s*$");
+    private static final Pattern P_DURATION = Pattern.compile(
+            "^\\s*(?:\\d+\\s*(?:saat|sa|dk|dak|sn|hr|h|min|мин|ч)\\.?\\s*)+$", FLAGS);
+    private static final Set<String> BUTTON_TEXTS = new HashSet<>(Arrays.asList(
+            "rotayı sonlandır", "rotayi sonlandir", "end route", "finish route", "exit navigation",
+            "завершить маршрут", "navigasyonu kapat", "çıkış", "kapat"));
+
+    /** Bu calismada gorulen farkli simgeler: imza -> dokum satirlari. */
+    private static final Map<String, String> SEEN_ICONS = new LinkedHashMap<>();
+
     private static final class Entry {
         String pkg;
         boolean ongoing;
         long when;
         final List<String> texts = new ArrayList<>();
+        final List<String> buttons = new ArrayList<>();
         final List<Bitmap> icons = new ArrayList<>();
         String distance = "";
+        float meters = -1f;
         String instruction = "";
         String extra = "";
         int direction = NavState.DIR_NONE;
+        String directionSource = "";
+        Bitmap icon;
+        boolean iconGlyph;
     }
 
     private static final Map<String, Entry> ENTRIES = new LinkedHashMap<>();
@@ -166,7 +185,13 @@ final class NavParser {
     private static void walk(View v, Entry e) {
         if (v == null || v.getVisibility() != View.VISIBLE) return;
         if (v instanceof TextView) {
-            add(e.texts, ((TextView) v).getText());
+            CharSequence cs = ((TextView) v).getText();
+            String low = cs == null ? "" : cs.toString().trim().toLowerCase(new Locale("tr", "TR"));
+            if (v instanceof Button || BUTTON_TEXTS.contains(low)) {
+                add(e.buttons, cs);
+            } else {
+                add(e.texts, cs);
+            }
         } else if (v instanceof ImageView) {
             Bitmap b = toBitmap(((ImageView) v).getDrawable());
             if (b != null && e.icons.size() < 6) e.icons.add(b);
@@ -204,38 +229,101 @@ final class NavParser {
     }
 
     private static void parse(Entry e) {
-        String distText = null;
+        String remainDist = "";
+        String remainTime = "";
+        String eta = "";
+        List<String> others = new ArrayList<>();
+
         for (String s : e.texts) {
+            if (s.startsWith("[")) continue;
+            if (BUTTON_TEXTS.contains(s.toLowerCase(new Locale("tr", "TR")))) continue;
+            Matcher only = P_DIST_ONLY.matcher(s);
+            if (only.matches()) {
+                String d = only.group(1) + " " + only.group(2).toLowerCase(Locale.ROOT);
+                if (e.distance.isEmpty()) {
+                    e.distance = d;
+                    e.meters = toMeters(only.group(1), only.group(2));
+                } else if (remainDist.isEmpty()) {
+                    remainDist = d;
+                }
+                continue;
+            }
+            if (P_CLOCK.matcher(s).matches()) {
+                if (eta.isEmpty()) eta = s.trim();
+                continue;
+            }
+            if (P_DURATION.matcher(s).matches()) {
+                if (remainTime.isEmpty()) remainTime = s.trim().replaceAll("\\.$", "");
+                continue;
+            }
             Matcher m = DIST.matcher(s);
-            if (m.find()) {
+            if (e.distance.isEmpty() && m.find()) {
+                // "200 m · Ornek Cad." gibi tek satirda gelen bicim.
                 e.distance = m.group(1) + " " + m.group(2).toLowerCase(Locale.ROOT);
-                distText = s;
+                e.meters = toMeters(m.group(1), m.group(2));
                 String rest = (s.substring(0, m.start()) + " " + s.substring(m.end()))
                         .replaceAll("^[\\s,.;:·\\-–]+|[\\s,.;:·\\-–]+$", "")
                         .replaceAll("\\s{2,}", " ");
-                if (rest.length() >= 2) e.instruction = rest;
-                break;
+                if (rest.length() >= 2) others.add(0, rest);
+                continue;
             }
-        }
-
-        List<String> others = new ArrayList<>();
-        for (String s : e.texts) {
-            if (s.equals(distText) || s.startsWith("[")) continue;
             others.add(s);
         }
-        if (e.instruction.isEmpty() && !others.isEmpty()) {
-            e.instruction = others.remove(0);
-        }
+
+        if (!others.isEmpty()) e.instruction = others.remove(0);
+
         StringBuilder extra = new StringBuilder();
-        for (int i = 0; i < others.size() && i < 2; i++) {
-            if (extra.length() > 0) extra.append(" · ");
-            extra.append(others.get(i));
+        if (!remainDist.isEmpty()) extra.append("Kalan ").append(remainDist);
+        if (!remainTime.isEmpty()) {
+            extra.append(extra.length() > 0 ? " · " : "Kalan ").append(remainTime);
         }
+        if (!eta.isEmpty()) {
+            if (extra.length() > 0) extra.append(" · ");
+            extra.append("Varış ").append(eta);
+        }
+        if (extra.length() == 0 && !others.isEmpty()) extra.append(others.get(0));
         e.extra = extra.toString();
+
+        // Manevra simgesi: kareye yakin ilk resim (ilerleme cubugu gibi enli resimler degil).
+        IconShape.Result shape = null;
+        for (Bitmap b : e.icons) {
+            float ratio = b.getWidth() / (float) Math.max(1, b.getHeight());
+            if (ratio < 0.8f || ratio > 1.25f) continue;
+            IconShape.Result r = IconShape.analyze(b);
+            remember(r);
+            if (e.icon == null) {
+                e.icon = b;
+                e.iconGlyph = r.glyph;
+                shape = r;
+            }
+        }
 
         StringBuilder all = new StringBuilder();
         for (String s : e.texts) all.append(s).append(" \n ");
         e.direction = detectDirection(all.toString());
+        if (e.direction != NavState.DIR_NONE) {
+            e.directionSource = "yazi";
+        } else if (shape != null && shape.direction != NavState.DIR_NONE) {
+            e.direction = shape.direction;
+            e.directionSource = "simge " + shape.signature;
+        }
+    }
+
+    private static float toMeters(String number, String unit) {
+        try {
+            float v = Float.parseFloat(number.replace(',', '.'));
+            String u = unit.toLowerCase(Locale.ROOT);
+            return (u.equals("km") || u.equals("км")) ? v * 1000f : v;
+        } catch (Exception ex) {
+            return -1f;
+        }
+    }
+
+    private static void remember(IconShape.Result r) {
+        if (r == null || r.signature.isEmpty() || SEEN_ICONS.containsKey(r.signature)) return;
+        if (SEEN_ICONS.size() >= 24) return;
+        SEEN_ICONS.put(r.signature, "simge " + r.signature + "  tahmin=" + IconShape.name(r.direction)
+                + "  kayma=" + String.format(Locale.ROOT, "%.2f", r.offset) + "\n" + r.ascii);
     }
 
     private static int detectDirection(String s) {
@@ -276,19 +364,26 @@ final class NavParser {
         }
 
         if (best != null) {
+            if (!best.distance.equals(NavState.distance)) {
+                NavState.distanceAt = SystemClock.elapsedRealtime();
+            }
             NavState.distance = best.distance;
+            NavState.distanceMeters = best.meters;
             NavState.instruction = best.instruction;
             NavState.extra = best.extra;
             NavState.direction = best.direction;
-            NavState.icon = best.icons.isEmpty() ? null : best.icons.get(0);
+            NavState.icon = best.icon;
+            NavState.iconGlyph = best.iconGlyph;
             NavState.active = true;
         } else {
             NavState.active = false;
             NavState.distance = "";
+            NavState.distanceMeters = -1f;
             NavState.instruction = "";
             NavState.extra = "";
             NavState.direction = NavState.DIR_NONE;
             NavState.icon = null;
+            NavState.iconGlyph = false;
         }
         NavState.appPresent = present || !ENTRIES.isEmpty();
 
@@ -312,8 +407,15 @@ final class NavParser {
                 d.append("  resim ").append(i + 1).append(": ")
                  .append(b.getWidth()).append("x").append(b.getHeight()).append('\n');
             }
-            d.append("  => mesafe=[").append(e.distance).append("] yon=").append(e.direction)
-             .append(" talimat=[").append(e.instruction).append("]\n\n");
+            for (String b : e.buttons) d.append("  tus: ").append(b).append('\n');
+            d.append("  => mesafe=[").append(e.distance).append("] yon=").append(IconShape.name(e.direction))
+             .append(e.directionSource.isEmpty() ? "" : " (" + e.directionSource + ")")
+             .append("\n  => talimat=[").append(e.instruction).append("]")
+             .append("\n  => ozet=[").append(e.extra).append("]\n\n");
+        }
+        if (!SEEN_ICONS.isEmpty()) {
+            d.append("GORULEN SIMGELER (").append(SEEN_ICONS.size()).append(")\n\n");
+            for (String v : SEEN_ICONS.values()) d.append(v).append('\n');
         }
         String dump = d.toString();
         if (!dump.equals(NavState.rawDump)) {

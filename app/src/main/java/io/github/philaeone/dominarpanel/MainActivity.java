@@ -14,6 +14,7 @@ import android.content.SharedPreferences;
 import android.content.pm.ActivityInfo;
 import android.content.pm.PackageManager;
 import android.content.pm.ResolveInfo;
+import android.graphics.Typeface;
 import android.location.Location;
 import android.location.LocationListener;
 import android.location.LocationManager;
@@ -72,6 +73,15 @@ public class MainActivity extends Activity implements PanelView.Actions, Locatio
         }
     };
 
+    /** Rota acik ve hareket halindeyken sematik yolun akici kaymasi icin sik cizim. */
+    private final Runnable animate = new Runnable() {
+        @Override
+        public void run() {
+            if (NavState.active && view.speed > 1f) view.invalidate();
+            handler.postDelayed(this, 150L);
+        }
+    };
+
     private final Runnable redraw = new Runnable() {
         @Override
         public void run() {
@@ -87,7 +97,6 @@ public class MainActivity extends Activity implements PanelView.Actions, Locatio
         locationManager = (LocationManager) getSystemService(Context.LOCATION_SERVICE);
 
         view = new PanelView(this, this);
-        view.mode = prefs.getInt("mode", PanelView.MODE_NAV);
         try {
             view.version = getPackageManager().getPackageInfo(getPackageName(), 0).versionName;
         } catch (Exception ignored) {
@@ -108,12 +117,15 @@ public class MainActivity extends Activity implements PanelView.Actions, Locatio
         startLocation();
         handler.removeCallbacks(tick);
         handler.post(tick);
+        handler.removeCallbacks(animate);
+        handler.postDelayed(animate, 150L);
     }
 
     @Override
     protected void onPause() {
         super.onPause();
         handler.removeCallbacks(tick);
+        handler.removeCallbacks(animate);
         Bus.listener = null;
         stopLocation();
     }
@@ -161,6 +173,7 @@ public class MainActivity extends Activity implements PanelView.Actions, Locatio
         } catch (Exception ignored) {
         }
 
+        view.volume = readVolume();
         view.locPermission = hasLocationPermission();
         if (SystemClock.elapsedRealtime() - lastFixAt > FIX_TIMEOUT_MS) view.speed = -1f;
         if (view.locPermission && !locating) startLocation();
@@ -174,6 +187,27 @@ public class MainActivity extends Activity implements PanelView.Actions, Locatio
             } catch (Throwable ignored) {
             }
         }
+        view.invalidate();
+    }
+
+    private float readVolume() {
+        try {
+            AudioManager am = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
+            int max = am.getStreamMaxVolume(AudioManager.STREAM_MUSIC);
+            return max > 0 ? am.getStreamVolume(AudioManager.STREAM_MUSIC) / (float) max : -1f;
+        } catch (Exception e) {
+            return -1f;
+        }
+    }
+
+    private void changeVolume(int direction) {
+        try {
+            AudioManager am = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
+            am.adjustStreamVolume(AudioManager.STREAM_MUSIC, direction, 0);
+        } catch (Exception e) {
+            toast("Ses değiştirilemedi");
+        }
+        view.volume = readVolume();
         view.invalidate();
     }
 
@@ -251,11 +285,6 @@ public class MainActivity extends Activity implements PanelView.Actions, Locatio
     @Override
     public void onAction(int id) {
         switch (id) {
-            case PanelView.A_TAB_NAV:
-            case PanelView.A_TAB_MUSIC:
-            case PanelView.A_MINI:
-                prefs.edit().putInt("mode", view.mode).apply();
-                break;
             case PanelView.A_OPEN_NAV:
                 launch(NAV_PKG, "Yandex Navigasyon");
                 break;
@@ -272,8 +301,13 @@ public class MainActivity extends Activity implements PanelView.Actions, Locatio
                 media(KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE);
                 break;
             case PanelView.A_NEXT:
-            case PanelView.A_MINI_NEXT:
                 media(KeyEvent.KEYCODE_MEDIA_NEXT);
+                break;
+            case PanelView.A_VOL_DOWN:
+                changeVolume(AudioManager.ADJUST_LOWER);
+                break;
+            case PanelView.A_VOL_UP:
+                changeVolume(AudioManager.ADJUST_RAISE);
                 break;
             case PanelView.A_GRANT_NOTIF:
                 openSettings(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS);
@@ -440,7 +474,8 @@ public class MainActivity extends Activity implements PanelView.Actions, Locatio
         TextView tv = new TextView(this);
         tv.setText(dump);
         tv.setTextIsSelectable(true);
-        tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f);
+        tv.setTypeface(Typeface.MONOSPACE);
+        tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f);
         int p = Math.round(20f * getResources().getDisplayMetrics().density);
         tv.setPadding(p, p, p, p);
         ScrollView sv = new ScrollView(this);
