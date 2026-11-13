@@ -1,0 +1,41 @@
+plugins {
+    id 'com.android.application'
+}
+
+// Her GitHub derlemesi surum numarasini bir artirir; panelde Menu basliginda gorunur.
+def buildNo = (System.getenv("GITHUB_RUN_NUMBER") ?: "1") as Integer
+
+android {
+    namespace 'io.github.philaeone.dominarpanel'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId 'io.github.philaeone.dominarpanel'
+        minSdk 26
+        targetSdk 34
+        versionCode buildNo
+        versionName "0.1.${buildNo}"
+    }
+
+    // Sabit anahtar: her derleme ayni imzayi tasir, boylece yeni surum
+    // eskisinin ustune kurulur ve verilen izinler silinmez.
+    signingConfigs {
+        debug {
+            storeFile file('../keystore/panel.jks')
+            storePassword 'dominarpanel'
+            keyAlias 'panel'
+            keyPassword 'dominarpanel'
+        }
+    }
+
+    buildTypes {
+        debug {
+            signingConfig signingConfigs.debug
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
