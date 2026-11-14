@@ -1,4 +1,4 @@
-package io.github.philaeone.dominarpanel;
+package io.github.philaeone.artci;
 
 import android.app.Notification;
 import android.content.Context;
@@ -35,11 +35,12 @@ import java.util.regex.Pattern;
  * "kac metre sonra, hangi yone" bilgisini cikarir.
  *
  * Yandex bu veriyi resmi bir yolla vermedigi icin tek kaynak bildirimdir.
- * Bildirimin bicimi bilinmedigi icin eldeki her seyi toplar: standart metin
- * alanlari, buyuk simge ve ozel bildirim gorunumunun icindeki yazilar/resimler.
+ * Bildirim ozel bir gorunum kullanir: yazilar (mesafe, sokak, kalan yol,
+ * varis saati, kalan sure) ve resimler (manevra simgesi, serit oklari,
+ * ilerleme cubugu). Yon yaziyla gelmez; manevra simgesinin seklinden okunur.
  */
 final class NavParser {
-    static final String TAG = "DominarPanel";
+    static final String TAG = "Artci";
 
     private static final Set<String> NAV_PACKAGES = new HashSet<>(Arrays.asList(
             "ru.yandex.yandexnavi",
@@ -56,6 +57,11 @@ final class NavParser {
 
     private static final Pattern DIST = Pattern.compile(
             "(\\d+(?:[.,]\\d+)?)\\s*(km|m|км|м)(?![\\p{L}])", FLAGS);
+    private static final Pattern P_DIST_ONLY = Pattern.compile(
+            "^\\s*(\\d+(?:[.,]\\d+)?)\\s*(km|m|км|м)\\.?\\s*$", FLAGS);
+    private static final Pattern P_CLOCK = Pattern.compile("^\\s*\\d{1,2}[:.]\\d{2}\\s*$");
+    private static final Pattern P_DURATION = Pattern.compile(
+            "^\\s*(?:\\d+\\s*(?:saat|sa|dk|dak|sn|hr|h|min|мин|ч)\\.?\\s*)+$", FLAGS);
     private static final Pattern P_RIGHT = Pattern.compile(
             B0 + "sağa|sağdan|sağda|sağdaki|sağ|right|направо|вправо|правее" + B1, FLAGS);
     private static final Pattern P_LEFT = Pattern.compile(
@@ -71,36 +77,42 @@ final class NavParser {
     private static final Pattern P_ARRIVE = Pattern.compile(
             B0 + "vardınız|ulaştınız|arrived|прибыли" + B1, FLAGS);
 
-    private static final Pattern P_DIST_ONLY = Pattern.compile(
-            "^\\s*(\\d+(?:[.,]\\d+)?)\\s*(km|m|км|м)\\.?\\s*$", FLAGS);
-    private static final Pattern P_CLOCK = Pattern.compile("^\\s*\\d{1,2}[:.]\\d{2}\\s*$");
-    private static final Pattern P_DURATION = Pattern.compile(
-            "^\\s*(?:\\d+\\s*(?:saat|sa|dk|dak|sn|hr|h|min|мин|ч)\\.?\\s*)+$", FLAGS);
     private static final Set<String> BUTTON_TEXTS = new HashSet<>(Arrays.asList(
             "rotayı sonlandır", "rotayi sonlandir", "end route", "finish route", "exit navigation",
             "завершить маршрут", "navigasyonu kapat", "çıkış", "kapat"));
 
-    /** Bu calismada gorulen farkli simgeler: imza -> dokum satirlari. */
-    private static final Map<String, String> SEEN_ICONS = new LinkedHashMap<>();
+    /** Bildirim gorunumundeki bir resim: kendisi, Yandex'in ona verdigi ad ve sekil cozumlemesi. */
+    private static final class Pic {
+        Bitmap bitmap;
+        String id = "";
+        IconShape.Result shape;
+        boolean square;
+    }
 
     private static final class Entry {
         String pkg;
         boolean ongoing;
         long when;
         final List<String> texts = new ArrayList<>();
+        final List<String> textIds = new ArrayList<>();
         final List<String> buttons = new ArrayList<>();
-        final List<Bitmap> icons = new ArrayList<>();
+        final List<Pic> pics = new ArrayList<>();
         String distance = "";
         float meters = -1f;
         String instruction = "";
-        String extra = "";
+        String remain = "";
+        String eta = "";
         int direction = NavState.DIR_NONE;
         String directionSource = "";
-        Bitmap icon;
-        boolean iconGlyph;
+        Pic chosen;
     }
 
     private static final Map<String, Entry> ENTRIES = new LinkedHashMap<>();
+    /** Bu calismada gorulen farkli simgeler: imza -> dokum. */
+    private static final Map<String, String> SEEN_ICONS = new LinkedHashMap<>();
+    private static String lastLogKey = "";
+    private static String lastLayoutKey = "";
+    private static boolean routeActive;
 
     private NavParser() {}
 
@@ -112,6 +124,7 @@ final class NavParser {
         if (sbn == null || !isNavPackage(sbn.getPackageName())) return;
         Notification n = sbn.getNotification();
         if (n == null) return;
+        RideLog.init(ctx);
 
         Entry e = new Entry();
         e.pkg = sbn.getPackageName();
@@ -121,25 +134,22 @@ final class NavParser {
         try {
             Bundle x = n.extras;
             if (x != null) {
-                add(e.texts, x.getCharSequence(Notification.EXTRA_TITLE));
-                add(e.texts, x.getCharSequence(Notification.EXTRA_TITLE_BIG));
-                add(e.texts, x.getCharSequence(Notification.EXTRA_TEXT));
-                add(e.texts, x.getCharSequence(Notification.EXTRA_BIG_TEXT));
-                add(e.texts, x.getCharSequence(Notification.EXTRA_SUB_TEXT));
-                add(e.texts, x.getCharSequence(Notification.EXTRA_INFO_TEXT));
-                add(e.texts, x.getCharSequence(Notification.EXTRA_SUMMARY_TEXT));
+                addText(e, x.getCharSequence(Notification.EXTRA_TITLE), "title");
+                addText(e, x.getCharSequence(Notification.EXTRA_TITLE_BIG), "title_big");
+                addText(e, x.getCharSequence(Notification.EXTRA_TEXT), "text");
+                addText(e, x.getCharSequence(Notification.EXTRA_BIG_TEXT), "big_text");
+                addText(e, x.getCharSequence(Notification.EXTRA_SUB_TEXT), "sub_text");
+                addText(e, x.getCharSequence(Notification.EXTRA_INFO_TEXT), "info_text");
+                addText(e, x.getCharSequence(Notification.EXTRA_SUMMARY_TEXT), "summary");
                 CharSequence[] lines = x.getCharSequenceArray(Notification.EXTRA_TEXT_LINES);
                 if (lines != null) {
-                    for (CharSequence line : lines) add(e.texts, line);
+                    for (CharSequence line : lines) addText(e, line, "line");
                 }
             }
             Icon large = n.getLargeIcon();
-            if (large != null) {
-                Bitmap b = toBitmap(large.loadDrawable(ctx));
-                if (b != null) e.icons.add(b);
-            }
+            if (large != null) addPic(e, toBitmap(large.loadDrawable(ctx)), "large_icon");
         } catch (Throwable t) {
-            e.texts.add("[bildirim okunamadi: " + t + "]");
+            addText(e, "[bildirim okunamadi: " + t + "]", "");
         }
 
         collect(ctx, n.bigContentView, e);
@@ -162,12 +172,36 @@ final class NavParser {
     }
 
     // ------------------------------------------------------------------
+    // Toplama
+    // ------------------------------------------------------------------
 
-    private static void add(List<String> out, CharSequence cs) {
+    private static void addText(Entry e, CharSequence cs, String id) {
         if (cs == null) return;
         String s = cs.toString().replace('\n', ' ').trim();
-        if (s.isEmpty() || out.contains(s)) return;
-        out.add(s);
+        if (s.isEmpty() || e.texts.contains(s)) return;
+        e.texts.add(s);
+        e.textIds.add(id == null ? "" : id);
+    }
+
+    private static void addPic(Entry e, Bitmap b, String id) {
+        if (b == null || e.pics.size() >= 10) return;
+        Pic p = new Pic();
+        p.bitmap = b;
+        p.id = id == null ? "" : id;
+        float ratio = b.getWidth() / (float) Math.max(1, b.getHeight());
+        p.square = ratio >= 0.8f && ratio <= 1.25f;
+        if (p.square) {
+            p.shape = IconShape.analyze(b);
+            // Ayni simge bildirimin birkac gorunumunde tekrar eder; bir kez tutulur.
+            for (Pic other : e.pics) {
+                if (other.shape != null && other.shape.signature.equals(p.shape.signature)
+                        && other.id.equals(p.id)) {
+                    return;
+                }
+            }
+            remember(p);
+        }
+        e.pics.add(p);
     }
 
     /** Ozel bildirim gorunumunu sisirip icindeki yazi ve resimleri toplar. */
@@ -178,7 +212,18 @@ final class NavParser {
             View root = rv.apply(app, new FrameLayout(app));
             walk(root, e);
         } catch (Throwable t) {
-            add(e.texts, "[ozel gorunum acilamadi: " + t.getClass().getSimpleName() + "]");
+            addText(e, "[ozel gorunum acilamadi: " + t.getClass().getSimpleName() + "]", "");
+        }
+    }
+
+    /** Gorunumun, kendi uygulamasinda tasidigi kaynak adi (ornegin "maneuver_icon"). */
+    private static String idName(View v) {
+        try {
+            int id = v.getId();
+            if (id == View.NO_ID) return "";
+            return v.getResources().getResourceEntryName(id);
+        } catch (Throwable t) {
+            return "";
         }
     }
 
@@ -188,13 +233,14 @@ final class NavParser {
             CharSequence cs = ((TextView) v).getText();
             String low = cs == null ? "" : cs.toString().trim().toLowerCase(new Locale("tr", "TR"));
             if (v instanceof Button || BUTTON_TEXTS.contains(low)) {
-                add(e.buttons, cs);
+                if (cs != null && !low.isEmpty() && !e.buttons.contains(cs.toString().trim())) {
+                    e.buttons.add(cs.toString().trim());
+                }
             } else {
-                add(e.texts, cs);
+                addText(e, cs, idName(v));
             }
         } else if (v instanceof ImageView) {
-            Bitmap b = toBitmap(((ImageView) v).getDrawable());
-            if (b != null && e.icons.size() < 6) e.icons.add(b);
+            addPic(e, toBitmap(((ImageView) v).getDrawable()), idName(v));
         }
         if (v instanceof ViewGroup) {
             ViewGroup g = (ViewGroup) v;
@@ -228,10 +274,13 @@ final class NavParser {
         }
     }
 
+    // ------------------------------------------------------------------
+    // Cozumleme
+    // ------------------------------------------------------------------
+
     private static void parse(Entry e) {
         String remainDist = "";
         String remainTime = "";
-        String eta = "";
         List<String> others = new ArrayList<>();
 
         for (String s : e.texts) {
@@ -249,7 +298,7 @@ final class NavParser {
                 continue;
             }
             if (P_CLOCK.matcher(s).matches()) {
-                if (eta.isEmpty()) eta = s.trim();
+                if (e.eta.isEmpty()) e.eta = s.trim();
                 continue;
             }
             if (P_DURATION.matcher(s).matches()) {
@@ -270,43 +319,50 @@ final class NavParser {
             others.add(s);
         }
 
-        if (!others.isEmpty()) e.instruction = others.remove(0);
+        if (!others.isEmpty()) e.instruction = others.get(0);
+        if (!remainDist.isEmpty() && !remainTime.isEmpty()) {
+            e.remain = remainDist + " / " + remainTime;
+        } else {
+            e.remain = remainDist + remainTime;
+        }
 
-        StringBuilder extra = new StringBuilder();
-        if (!remainDist.isEmpty()) extra.append("Kalan ").append(remainDist);
-        if (!remainTime.isEmpty()) {
-            extra.append(extra.length() > 0 ? " · " : "Kalan ").append(remainTime);
-        }
-        if (!eta.isEmpty()) {
-            if (extra.length() > 0) extra.append(" · ");
-            extra.append("Varış ").append(eta);
-        }
-        if (extra.length() == 0 && !others.isEmpty()) extra.append(others.get(0));
-        e.extra = extra.toString();
-
-        // Manevra simgesi: kareye yakin ilk resim (ilerleme cubugu gibi enli resimler degil).
-        IconShape.Result shape = null;
-        for (Bitmap b : e.icons) {
-            float ratio = b.getWidth() / (float) Math.max(1, b.getHeight());
-            if (ratio < 0.8f || ratio > 1.25f) continue;
-            IconShape.Result r = IconShape.analyze(b);
-            remember(r);
-            if (e.icon == null) {
-                e.icon = b;
-                e.iconGlyph = r.glyph;
-                shape = r;
-            }
-        }
+        e.chosen = chooseManeuver(e);
 
         StringBuilder all = new StringBuilder();
         for (String s : e.texts) all.append(s).append(" \n ");
         e.direction = detectDirection(all.toString());
         if (e.direction != NavState.DIR_NONE) {
             e.directionSource = "yazi";
-        } else if (shape != null && shape.direction != NavState.DIR_NONE) {
-            e.direction = shape.direction;
-            e.directionSource = "simge " + shape.signature;
+        } else if (e.chosen != null && e.chosen.shape != null
+                && e.chosen.shape.direction != NavState.DIR_NONE) {
+            IconShape.Result r = e.chosen.shape;
+            e.direction = r.direction;
+            e.directionSource = r.template.isEmpty()
+                    ? "kural " + r.signature
+                    : "sablon " + r.template + String.format(Locale.ROOT, " %.2f", r.score);
         }
+    }
+
+    /**
+     * Manevra simgesini secer. Bildirimde serit oklari da kare resim olarak
+     * bulunabilir; Yandex'in resme verdigi ad biliniyorsa ona gore ayrilir,
+     * bilinmiyorsa ilk kare resim alinir.
+     */
+    private static Pic chooseManeuver(Entry e) {
+        Pic firstSquare = null;
+        Pic firstNotLane = null;
+        for (Pic p : e.pics) {
+            if (!p.square) continue;
+            String id = p.id.toLowerCase(Locale.ROOT);
+            boolean lane = id.contains("lane");
+            if (firstSquare == null) firstSquare = p;
+            if (!lane && firstNotLane == null) firstNotLane = p;
+            if (!lane && (id.contains("maneuver") || id.contains("manoeuvre") || id.contains("turn")
+                    || id.contains("direction") || id.contains("action") || id.contains("arrow"))) {
+                return p;
+            }
+        }
+        return firstNotLane != null ? firstNotLane : firstSquare;
     }
 
     private static float toMeters(String number, String unit) {
@@ -319,11 +375,18 @@ final class NavParser {
         }
     }
 
-    private static void remember(IconShape.Result r) {
+    /** Ilk kez gorulen simgeyi dokumuyle birlikte hem ekrandaki listeye hem surus kaydina yazar. */
+    private static void remember(Pic p) {
+        IconShape.Result r = p.shape;
         if (r == null || r.signature.isEmpty() || SEEN_ICONS.containsKey(r.signature)) return;
-        if (SEEN_ICONS.size() >= 24) return;
-        SEEN_ICONS.put(r.signature, "simge " + r.signature + "  tahmin=" + IconShape.name(r.direction)
-                + "  kayma=" + String.format(Locale.ROOT, "%.2f", r.offset) + "\n" + r.ascii);
+        if (SEEN_ICONS.size() >= 40) return;
+        String head = "simge " + r.signature + "  ad=" + (p.id.isEmpty() ? "-" : p.id)
+                + "  tahmin=" + IconShape.name(r.direction)
+                + (r.template.isEmpty() ? "  (sablon yok, en yakin "
+                        + String.format(Locale.ROOT, "%.2f", r.score) + ")"
+                        : "  sablon=" + r.template + String.format(Locale.ROOT, " %.2f", r.score));
+        SEEN_ICONS.put(r.signature, head + "\n" + r.ascii);
+        RideLog.line("YENI " + head + "\n" + r.ascii);
     }
 
     private static int detectDirection(String s) {
@@ -349,6 +412,10 @@ final class NavParser {
         return NavState.DIR_NONE;
     }
 
+    // ------------------------------------------------------------------
+    // Yayin ve kayit
+    // ------------------------------------------------------------------
+
     private static void publish() {
         Entry best = null;
         boolean present = false;
@@ -370,58 +437,115 @@ final class NavParser {
             NavState.distance = best.distance;
             NavState.distanceMeters = best.meters;
             NavState.instruction = best.instruction;
-            NavState.extra = best.extra;
+            NavState.remain = best.remain;
+            NavState.eta = best.eta;
             NavState.direction = best.direction;
-            NavState.icon = best.icon;
-            NavState.iconGlyph = best.iconGlyph;
+            NavState.icon = best.chosen == null ? null : best.chosen.bitmap;
+            NavState.iconGlyph = best.chosen != null && best.chosen.shape != null && best.chosen.shape.glyph;
             NavState.active = true;
         } else {
             NavState.active = false;
             NavState.distance = "";
             NavState.distanceMeters = -1f;
             NavState.instruction = "";
-            NavState.extra = "";
+            NavState.remain = "";
+            NavState.eta = "";
             NavState.direction = NavState.DIR_NONE;
             NavState.icon = null;
             NavState.iconGlyph = false;
         }
         NavState.appPresent = present || !ENTRIES.isEmpty();
 
+        logState(best);
+        NavState.rawDump = buildDump();
+        Bus.changed();
+    }
+
+    /** Surus kaydi: rota baslangici/bitisi, bildirim duzeni ve her anlamli degisiklik. */
+    private static void logState(Entry best) {
+        if (best != null && !routeActive) {
+            routeActive = true;
+            RideLog.line("ROTA BASLADI  " + best.pkg);
+        } else if (best == null && routeActive) {
+            routeActive = false;
+            lastLogKey = "";
+            RideLog.line("ROTA BITTI  " + RideLog.status());
+        }
+        if (best == null) return;
+
+        // Bildirimin duzeni (hangi ad hangi yaziyi/resmi tasiyor) degistiginde bir kez yazilir.
+        StringBuilder layout = new StringBuilder();
+        for (int i = 0; i < best.texts.size(); i++) {
+            layout.append(" yazi[").append(best.textIds.get(i).isEmpty() ? "-" : best.textIds.get(i)).append(']');
+        }
+        for (Pic p : best.pics) {
+            layout.append(" resim[").append(p.id.isEmpty() ? "-" : p.id).append(' ')
+                  .append(p.bitmap.getWidth()).append('x').append(p.bitmap.getHeight()).append(']');
+        }
+        String layoutKey = layout.toString();
+        if (!layoutKey.equals(lastLayoutKey)) {
+            lastLayoutKey = layoutKey;
+            RideLog.line("DUZEN" + layoutKey);
+        }
+
+        StringBuilder icons = new StringBuilder();
+        for (Pic p : best.pics) {
+            if (!p.square || p.shape == null) continue;
+            icons.append(' ').append(p == best.chosen ? "*" : "")
+                 .append(p.id.isEmpty() ? "-" : p.id).append(':').append(p.shape.signature)
+                 .append('=').append(IconShape.name(p.shape.direction));
+        }
+        String key = best.distance + "|" + best.instruction + "|" + best.direction + "|" + icons;
+        if (key.equals(lastLogKey)) return;
+        lastLogKey = key;
+        RideLog.line("NAV " + (best.distance.isEmpty() ? "-" : best.distance)
+                + " | " + (best.instruction.isEmpty() ? "-" : best.instruction)
+                + " | " + IconShape.name(best.direction)
+                + (best.directionSource.isEmpty() ? "" : " (" + best.directionSource + ")")
+                + " | kalan " + (best.remain.isEmpty() ? "-" : best.remain)
+                + " varis " + (best.eta.isEmpty() ? "-" : best.eta)
+                + " | " + RideLog.status()
+                + " | simgeler:" + icons);
+    }
+
+    private static String buildDump() {
         StringBuilder d = new StringBuilder();
         if (ENTRIES.isEmpty()) {
             d.append("Navigasyon uygulamasindan bildirim yok.\n\n")
-             .append("Yandex Navigasyon'da bir rota baslatip bu ekrana geri don.");
+             .append("Yandex Navigasyon'da bir rota baslatip bu ekrana geri don.\n\n");
         }
         int n = 0;
-        for (Map.Entry<String, Entry> me : ENTRIES.entrySet()) {
-            Entry e = me.getValue();
+        for (Entry e : ENTRIES.values()) {
             n++;
             d.append("#").append(n).append("  ").append(e.pkg)
              .append(e.ongoing ? "  (kalici)" : "  (gecici)").append('\n');
             for (int i = 0; i < e.texts.size(); i++) {
-                d.append("  yazi ").append(i + 1).append(": ").append(e.texts.get(i)).append('\n');
+                d.append("  yazi ").append(i + 1)
+                 .append(e.textIds.get(i).isEmpty() ? "" : " [" + e.textIds.get(i) + "]")
+                 .append(": ").append(e.texts.get(i)).append('\n');
             }
             if (e.texts.isEmpty()) d.append("  (yazi yok)\n");
-            for (int i = 0; i < e.icons.size(); i++) {
-                Bitmap b = e.icons.get(i);
-                d.append("  resim ").append(i + 1).append(": ")
-                 .append(b.getWidth()).append("x").append(b.getHeight()).append('\n');
+            for (int i = 0; i < e.pics.size(); i++) {
+                Pic p = e.pics.get(i);
+                d.append("  resim ").append(i + 1)
+                 .append(p.id.isEmpty() ? "" : " [" + p.id + "]").append(": ")
+                 .append(p.bitmap.getWidth()).append("x").append(p.bitmap.getHeight());
+                if (p.shape != null) {
+                    d.append("  ").append(p.shape.signature).append(" = ").append(IconShape.name(p.shape.direction));
+                }
+                if (p == e.chosen) d.append("  <= manevra");
+                d.append('\n');
             }
             for (String b : e.buttons) d.append("  tus: ").append(b).append('\n');
             d.append("  => mesafe=[").append(e.distance).append("] yon=").append(IconShape.name(e.direction))
              .append(e.directionSource.isEmpty() ? "" : " (" + e.directionSource + ")")
              .append("\n  => talimat=[").append(e.instruction).append("]")
-             .append("\n  => ozet=[").append(e.extra).append("]\n\n");
+             .append("\n  => kalan=[").append(e.remain).append("] varis=[").append(e.eta).append("]\n\n");
         }
         if (!SEEN_ICONS.isEmpty()) {
             d.append("GORULEN SIMGELER (").append(SEEN_ICONS.size()).append(")\n\n");
             for (String v : SEEN_ICONS.values()) d.append(v).append('\n');
         }
-        String dump = d.toString();
-        if (!dump.equals(NavState.rawDump)) {
-            NavState.rawDump = dump;
-            Log.i(TAG, dump);
-        }
-        Bus.changed();
+        return d.toString();
     }
 }

@@ -1,4 +1,4 @@
-package io.github.philaeone.dominarpanel;
+package io.github.philaeone.artci;
 
 import android.Manifest;
 import android.app.Activity;
@@ -32,6 +32,8 @@ import android.os.PowerManager;
 import android.os.SystemClock;
 import android.provider.Settings;
 import android.service.notification.NotificationListenerService;
+import android.text.InputFilter;
+import android.text.InputType;
 import android.text.TextUtils;
 import android.util.Log;
 import android.util.TypedValue;
@@ -41,6 +43,7 @@ import android.view.View;
 import android.view.ViewGroup;
 import android.view.WindowManager;
 import android.widget.BaseAdapter;
+import android.widget.EditText;
 import android.widget.GridView;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
@@ -63,18 +66,21 @@ public class MainActivity extends Activity implements PanelView.Actions, Locatio
     private static final int REQ_LOCATION = 1;
     private static final int REQ_HOME = 2;
     private static final long FIX_TIMEOUT_MS = 4000L;
+    private static final long ANIM_MS = 50L;
+    private static final long HEARTBEAT_MS = 30000L;
 
-    private static final int BG = 0xFF0B0D0C;
-    private static final int ROW = 0xFF161A18;
-    private static final int LINE = 0xFF26302B;
-    private static final int WHITE = 0xFFF2F5F3;
-    private static final int GREY = 0xFF98A39D;
-    private static final int GREEN = 0xFF39D353;
-    private static final int AMBER = 0xFFFFB300;
+    private static final String DEFAULT_BIKE = "DOMINAR 400";
+
+    private static final int BG = 0xFF050505;
+    private static final int ROW = 0xFF111111;
+    private static final int WHITE = 0xFFFFFFFF;
+    private static final int GREY = 0xFF8C8C8C;
+    private static final int AMBER = 0xFFFFC400;
 
     private static final String[] ORIENT_NAMES = {"Otomatik", "Dikey", "Yatay"};
     private static final String[] KEEP_ON_NAMES = {"Her zaman", "Sadece şarjdayken", "Kapalı"};
     private static final String[] BRIGHT_NAMES = {"Sistem ayarı", "En yüksek"};
+    private static final String[] COLOR_NAMES = {"Çalan şarkının kapağına göre", "Sabit kırmızı"};
 
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final SimpleDateFormat clockFormat = new SimpleDateFormat("HH:mm", Locale.ROOT);
@@ -89,6 +95,7 @@ public class MainActivity extends Activity implements PanelView.Actions, Locatio
     private long lastLocSavedAt;
     private boolean charging;
     private float battTemp = Float.NaN;
+    private long lastHeartbeatAt;
 
     private Dialog settingsDialog;
     private LinearLayout settingsList;
@@ -108,12 +115,15 @@ public class MainActivity extends Activity implements PanelView.Actions, Locatio
         }
     };
 
-    /** Rota acik ve hareket halindeyken sematik yolun akici kaymasi icin sik cizim. */
+    /**
+     * Rota acik ve hareket halindeyken yolun akici kaymasi icin sik cizim.
+     * Diger animasyonlari (ibre, renk gecisi, tus) panel kendi surdurur.
+     */
     private final Runnable animate = new Runnable() {
         @Override
         public void run() {
             if (NavState.active && view.speed > 1f) view.invalidate();
-            handler.postDelayed(this, 150L);
+            handler.postDelayed(this, ANIM_MS);
         }
     };
 
@@ -140,6 +150,9 @@ public class MainActivity extends Activity implements PanelView.Actions, Locatio
             view.version = getPackageManager().getPackageInfo(getPackageName(), 0).versionName;
         } catch (Exception ignored) {
         }
+        applyLook();
+        RideLog.init(this);
+        RideLog.line("ACILDI  surum " + view.version + "  " + Build.MODEL + "  Android " + Build.VERSION.RELEASE);
         setContentView(view);
         applyOrientation();
         applyBrightness();
@@ -159,7 +172,7 @@ public class MainActivity extends Activity implements PanelView.Actions, Locatio
         handler.removeCallbacks(tick);
         handler.post(tick);
         handler.removeCallbacks(animate);
-        handler.postDelayed(animate, 150L);
+        handler.postDelayed(animate, ANIM_MS);
         if (settingsDialog != null && settingsDialog.isShowing()) fillSettings();
     }
 
@@ -227,6 +240,17 @@ public class MainActivity extends Activity implements PanelView.Actions, Locatio
         if (view.locPermission && !locating) startLocation();
 
         updateWeather(false);
+
+        RideLog.speed = view.speed;
+        RideLog.battTemp = battTemp;
+        RideLog.battery = view.battery;
+        long nowMs = SystemClock.elapsedRealtime();
+        if (view.speed > 5f && nowMs - lastHeartbeatAt >= HEARTBEAT_MS) {
+            // Rota olmasa da surus sirasindaki isi ve sarj durumu kayda gecsin.
+            lastHeartbeatAt = nowMs;
+            RideLog.line("DURUM  " + RideLog.status() + (charging ? " sarjda" : " sarjsiz")
+                    + (NavState.active ? "" : "  rota yok"));
+        }
 
         boolean enabled = isListenerEnabled();
         view.listenerEnabled = enabled;
@@ -472,14 +496,21 @@ public class MainActivity extends Activity implements PanelView.Actions, Locatio
         back.setTypeface(Typeface.DEFAULT_BOLD);
         back.setTextSize(TypedValue.COMPLEX_UNIT_SP, 22f);
         back.setGravity(Gravity.CENTER_VERTICAL);
-        back.setPadding(dp(20), 0, dp(20), 0);
-        back.setBackgroundColor(ROW);
+        back.setPadding(dp(24), 0, dp(20), 0);
+        back.setBackground(frame(ROW));
         back.setOnClickListener(v -> d.dismiss());
-        root.addView(back, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(64)));
+        LinearLayout.LayoutParams blp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(64));
+        blp.setMargins(dp(10), dp(10), dp(10), dp(4));
+        root.addView(back, blp);
 
         root.addView(content, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
         d.setContentView(root);
         return d;
+    }
+
+    /** Panel kutulariyla ayni kesik koseli cerceve; renkler o anki temadan. */
+    private Drawable frame(int fillColor) {
+        return new Ui.Frame(fillColor, view.accentDimColor(), view.accentColor(), dp(10), dp(1.5f));
     }
 
     // ------------------------------------------------------------------
@@ -487,43 +518,76 @@ public class MainActivity extends Activity implements PanelView.Actions, Locatio
     // ------------------------------------------------------------------
 
     private void showMenu() {
+        boolean landscape = getResources().getConfiguration().orientation
+                == android.content.res.Configuration.ORIENTATION_LANDSCAPE;
         LinearLayout list = new LinearLayout(this);
         list.setOrientation(LinearLayout.VERTICAL);
-        list.setPadding(dp(12), dp(12), dp(12), dp(12));
+        list.setPadding(dp(10), dp(4), dp(10), dp(10));
         final Dialog d = fullScreen("Menü", list);
 
-        addTile(list, "Yandex Navigasyon", () -> {
+        // Yatayda 2x2, dikeyde alt alta dort tus.
+        LinearLayout rowA = list;
+        LinearLayout rowB = list;
+        if (landscape) {
+            rowA = new LinearLayout(this);
+            rowB = new LinearLayout(this);
+            list.addView(rowA, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
+            list.addView(rowB, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
+        }
+        addTile(rowA, landscape, "Yandex Navigasyon", appIcon(NAV_PKG), () -> {
             d.dismiss();
             launch(NAV_PKG, "Yandex Navigasyon");
         });
-        addTile(list, "Spotify", () -> {
+        addTile(rowA, landscape, "Spotify", appIcon(MUSIC_PKG), () -> {
             d.dismiss();
             launch(MUSIC_PKG, "Spotify");
         });
-        addTile(list, "Uygulamalar", () -> {
+        addTile(rowB, landscape, "Uygulamalar", new Ui.Glyph(Ui.GLYPH_GRID, WHITE, view.accentColor()), () -> {
             d.dismiss();
             showApps();
         });
-        addTile(list, "Ayarlar", () -> {
+        addTile(rowB, landscape, "Ayarlar", new Ui.Glyph(Ui.GLYPH_SLIDERS, WHITE, view.accentColor()), () -> {
             d.dismiss();
             showSettings();
         });
         d.show();
     }
 
+    /** Uygulamanin kendi simgesi; kurulu degilse null. */
+    private Drawable appIcon(String pkg) {
+        try {
+            return getPackageManager().getApplicationIcon(pkg);
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
     /** Ekrani esit paylasan buyuk tus; eldivenle basmak icin. */
-    private void addTile(LinearLayout parent, String label, final Runnable action) {
+    private void addTile(LinearLayout parent, boolean inRow, String label, Drawable icon, final Runnable action) {
+        LinearLayout tile = new LinearLayout(this);
+        tile.setOrientation(LinearLayout.HORIZONTAL);
+        tile.setGravity(Gravity.CENTER_VERTICAL);
+        tile.setPadding(dp(28), 0, dp(20), 0);
+        tile.setBackground(frame(ROW));
+        tile.setOnClickListener(v -> action.run());
+
+        ImageView iv = new ImageView(this);
+        if (icon != null) iv.setImageDrawable(icon);
+        tile.addView(iv, new LinearLayout.LayoutParams(dp(56), dp(56)));
+
         TextView t = new TextView(this);
         t.setText(label);
         t.setTextColor(WHITE);
-        t.setTypeface(Typeface.DEFAULT_BOLD);
+        t.setTypeface(Typeface.create("sans-serif-condensed", Typeface.BOLD));
         t.setTextSize(TypedValue.COMPLEX_UNIT_SP, 24f);
-        t.setGravity(Gravity.CENTER);
-        t.setBackgroundColor(LINE);
-        t.setOnClickListener(v -> action.run());
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f);
-        lp.setMargins(0, dp(6), 0, dp(6));
-        parent.addView(t, lp);
+        t.setPadding(dp(22), 0, 0, 0);
+        tile.addView(t, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+        LinearLayout.LayoutParams lp = inRow
+                ? new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f)
+                : new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f);
+        lp.setMargins(dp(5), dp(5), dp(5), dp(5));
+        parent.addView(tile, lp);
     }
 
     // ------------------------------------------------------------------
@@ -586,7 +650,7 @@ public class MainActivity extends Activity implements PanelView.Actions, Locatio
                     cell.setOrientation(LinearLayout.VERTICAL);
                     cell.setGravity(Gravity.CENTER_HORIZONTAL);
                     cell.setPadding(dp(6), dp(12), dp(6), dp(10));
-                    cell.setBackgroundColor(ROW);
+                    cell.setBackground(frame(ROW));
                     ImageView iv = new ImageView(MainActivity.this);
                     cell.addView(iv, new LinearLayout.LayoutParams(dp(60), dp(60)));
                     TextView tv = new TextView(MainActivity.this);
@@ -644,8 +708,19 @@ public class MainActivity extends Activity implements PanelView.Actions, Locatio
         addHeader("PANEL");
         final boolean isHome = isDefaultHome();
         addRow("Ana ekran yap",
-                isHome ? "Dominar Panel şu an ana ekran" : "Şu an: " + currentHomeLabel() + ". Değiştirmek için dokun.",
+                isHome ? "Artçı şu an ana ekran" : "Şu an: " + currentHomeLabel() + ". Değiştirmek için dokun.",
                 isHome, this::requestHomeRole);
+
+        String bike = prefs.getString("bikeName", DEFAULT_BIKE);
+        addRow("Motor adı", (bike.isEmpty() ? "Gösterilmiyor" : bike) + "  (hız kadranının üstünde yazar)", true,
+                this::editBikeName);
+
+        final int colorMode = prefs.getInt("colorMode", 0);
+        addRow("Renk", COLOR_NAMES[colorMode], true, () -> {
+            prefs.edit().putInt("colorMode", (colorMode + 1) % 2).apply();
+            applyLook();
+            fillSettings();
+        });
 
         final int keep = prefs.getInt("keepOn", 0);
         addRow("Ekranı açık tut", KEEP_ON_NAMES[keep] + "  (panel ekrandayken)", true, () -> {
@@ -711,7 +786,19 @@ public class MainActivity extends Activity implements PanelView.Actions, Locatio
             handler.postDelayed(this::refreshSettingsIfOpen, 4000L);
         });
 
-        addRow("Ham navigasyon verisi", "Yandex'in bildiriminden okunan her şey", true, this::showRawNav);
+        addHeader("KAYIT");
+        addRow("Sürüş kaydı", "Navigasyondan okunanlar, hız ve pil sıcaklığı. Sürüşten sonra buradan kopyalanır.",
+                true, this::showRideLog);
+        addRow("Kaydı temizle", "Yeni bir sürüşe boş kayıtla başlamak için", true, () ->
+                new AlertDialog.Builder(this)
+                        .setMessage("Sürüş kaydı silinsin mi?")
+                        .setPositiveButton("Sil", (dialog, which) -> {
+                            RideLog.clear();
+                            toast("Kayıt silindi");
+                        })
+                        .setNegativeButton("Vazgeç", null)
+                        .show());
+        addRow("Ham navigasyon verisi", "Yandex'in bildiriminden şu an okunan her şey", true, this::showRawNav);
         addRow("Android ayarları", "Telefonun kendi ayar ekranı", true, () -> openSettings(Settings.ACTION_SETTINGS));
         addRow("Sürüm", view.version, true, null);
     }
@@ -723,7 +810,7 @@ public class MainActivity extends Activity implements PanelView.Actions, Locatio
     private void addHeader(String text) {
         TextView t = new TextView(this);
         t.setText(text);
-        t.setTextColor(GREEN);
+        t.setTextColor(view.accentColor());
         t.setTypeface(Typeface.DEFAULT_BOLD);
         t.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f);
         t.setLetterSpacing(0.12f);
@@ -799,6 +886,66 @@ public class MainActivity extends Activity implements PanelView.Actions, Locatio
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
         if (requestCode == REQ_HOME) refreshSettingsIfOpen();
+    }
+
+    // --- Gorunus ---
+
+    private void applyLook() {
+        view.bikeName = prefs.getString("bikeName", DEFAULT_BIKE);
+        view.coverColors = prefs.getInt("colorMode", 0) == 0;
+        view.invalidate();
+    }
+
+    private void editBikeName() {
+        final EditText input = new EditText(this);
+        input.setText(prefs.getString("bikeName", DEFAULT_BIKE));
+        input.setSingleLine(true);
+        input.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS);
+        input.setFilters(new InputFilter[] {new InputFilter.LengthFilter(18)});
+        input.setSelectAllOnFocus(true);
+        LinearLayout box = new LinearLayout(this);
+        box.setPadding(dp(20), dp(8), dp(20), 0);
+        box.addView(input, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        new AlertDialog.Builder(this)
+                .setTitle("Motor adı")
+                .setMessage("Boş bırakırsan kadranda yazı çıkmaz.")
+                .setView(box)
+                .setPositiveButton("Kaydet", (dialog, which) -> {
+                    String name = input.getText().toString().trim().toUpperCase(new Locale("tr"));
+                    prefs.edit().putString("bikeName", name).apply();
+                    applyLook();
+                    refreshSettingsIfOpen();
+                })
+                .setNegativeButton("Vazgeç", null)
+                .show();
+    }
+
+    /** Kalici surus kaydinin son satirlari; kopyalanip gonderilebilir. */
+    private void showRideLog() {
+        String tail = RideLog.tail();
+        final String text = (tail.isEmpty() ? "Kayıt boş.\n" : tail) + "\nDosya: " + RideLog.path();
+        TextView tv = new TextView(this);
+        tv.setText(text);
+        tv.setTextIsSelectable(true);
+        tv.setTypeface(Typeface.MONOSPACE);
+        tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f);
+        int p = dp(16);
+        tv.setPadding(p, p, p, p);
+        final ScrollView sv = new ScrollView(this);
+        sv.addView(tv);
+        new AlertDialog.Builder(this)
+                .setTitle("Sürüş kaydı (son 500 satır)")
+                .setView(sv)
+                .setPositiveButton("Kapat", null)
+                .setNeutralButton("Kopyala", (dialog, which) -> {
+                    ClipboardManager cm = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+                    if (cm != null) cm.setPrimaryClip(ClipData.newPlainText("surus", text));
+                    toast("Kopyalandı");
+                })
+                .show();
+        // En yeni satirlar sonda; pencere acilinca oraya in.
+        sv.post(() -> sv.fullScroll(View.FOCUS_DOWN));
     }
 
     // --- Ekran ---

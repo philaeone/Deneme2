@@ -1,4 +1,4 @@
-package io.github.philaeone.dominarpanel;
+package io.github.philaeone.artci;
 
 import android.graphics.Bitmap;
 
@@ -26,8 +26,10 @@ final class NavState {
     static volatile long distanceAt;
     /** Donulecek sokak ya da talimat metni. */
     static volatile String instruction = "";
-    /** "Kalan 7 km · 7 dk · Varış 17:56" gibi ozet satiri. */
-    static volatile String extra = "";
+    /** Hedefe kalan yol ve sure: "7 km / 7 dk". */
+    static volatile String remain = "";
+    /** Varis saati: "17:56". */
+    static volatile String eta = "";
     static volatile int direction = DIR_NONE;
     /** Navigasyon uygulamasinin kendi manevra simgesi. */
     static volatile Bitmap icon;

@@ -1,4 +1,4 @@
-package io.github.philaeone.dominarpanel;
+package io.github.philaeone.artci;
 
 import android.graphics.Bitmap;
 import android.graphics.Color;

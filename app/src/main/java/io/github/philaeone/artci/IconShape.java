@@ -1,4 +1,4 @@
-package io.github.philaeone.dominarpanel;
+package io.github.philaeone.artci;
 
 import android.graphics.Bitmap;
 
@@ -20,6 +20,9 @@ final class IconShape {
         String signature = "";
         String ascii = "";
         float offset;
+        /** Eslesen sablonun adi; eslesme yoksa bos. */
+        String template = "";
+        float score;
     }
 
     private IconShape() {}
@@ -74,6 +77,9 @@ final class IconShape {
             r.signature = Integer.toHexString(r.ascii.hashCode());
 
             if (count < 20 || count > px.length * 0.8f) return r;
+
+            // Once bilinen gercek simgelerle karsilastir; tutarsa kural tabanli tahmine gerek yok.
+            if (matchTemplate(r)) return r;
 
             int minX = N, maxX = -1, minY = N, maxY = -1;
             for (int y = 0; y < N; y++) {
@@ -161,6 +167,45 @@ final class IconShape {
             r.direction = NavState.DIR_NONE;
         }
         return r;
+    }
+
+    /** Maskeyi sablonlarla karsilastirir; kesisim/birlesim orani yeterliyse yonu yazar. */
+    private static boolean matchTemplate(Result r) {
+        String[] rows = r.ascii.split("\n");
+        if (rows.length < 24) return false;
+        int best = -1;
+        float bestScore = 0f;
+        for (int t = 0; t < IconTemplates.ROWS.length; t++) {
+            String[] tpl = IconTemplates.ROWS[t];
+            for (int dy = -1; dy <= 1; dy++) {
+                for (int dx = -1; dx <= 1; dx++) {
+                    int inter = 0;
+                    int union = 0;
+                    for (int y = 0; y < 24; y++) {
+                        int ty = y + dy;
+                        for (int x = 0; x < 24; x++) {
+                            int tx = x + dx;
+                            boolean a = rows[y].charAt(x) == '#';
+                            boolean b = ty >= 0 && ty < 24 && tx >= 0 && tx < 24 && tpl[ty].charAt(tx) == '#';
+                            if (a && b) inter++;
+                            if (a || b) union++;
+                        }
+                    }
+                    float score = union == 0 ? 0f : inter / (float) union;
+                    if (score > bestScore) {
+                        bestScore = score;
+                        best = t;
+                    }
+                }
+            }
+        }
+        r.score = bestScore;
+        if (best >= 0 && bestScore >= 0.72f) {
+            r.direction = IconTemplates.DIRECTIONS[best];
+            r.template = IconTemplates.NAMES[best];
+            return true;
+        }
+        return false;
     }
 
     private static int colorDistance(int a, int b) {

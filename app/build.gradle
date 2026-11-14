@@ -6,11 +6,11 @@ plugins {
 def buildNo = (System.getenv("GITHUB_RUN_NUMBER") ?: "1") as Integer
 
 android {
-    namespace 'io.github.philaeone.dominarpanel'
+    namespace 'io.github.philaeone.artci'
     compileSdk 34
 
     defaultConfig {
-        applicationId 'io.github.philaeone.dominarpanel'
+        applicationId 'io.github.philaeone.artci'
         minSdk 26
         targetSdk 34
         versionCode buildNo
